@@ -14,9 +14,12 @@
     // image clean.
     "ghcr.io/devcontainers/features/docker-in-docker:2": {}
   },
-  // Headroom for container images now that apps run under Docker (default is
-  // ~32GB, which fills quickly across many app images).
-  "hostRequirements": { "storage": "64gb" },
+  // Storage tier. 32gb keeps codespaces on the cheapest machine
+  // (basicLinux32gb: 2 cores / 8GB RAM / 32GB storage) — GitHub couples storage
+  // to machine size, and requiring 64gb would force the 8-core premium machine.
+  // Trade-off: less headroom for many large Docker images; bump back to "64gb"
+  // (and the machine pin in lib/github.ts) if image space becomes the bottleneck.
+  "hostRequirements": { "storage": "32gb" },
   // 6080 must be in forwardPorts so the public forwarded URL
   // (<codespace>-6080.app.github.dev) actually maps to it. Auto-forward only
   // fires when the VS Code editor client detects the listener; the Codespaces
