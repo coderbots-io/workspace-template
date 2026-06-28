@@ -1,5 +1,5 @@
 import * as p from "@clack/prompts";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { claude } from "../env.js";
@@ -8,13 +8,36 @@ import { ask } from "../prompt.js";
 import type { Step } from "../types.js";
 
 const CREDENTIALS = path.join(os.homedir(), ".claude", ".credentials.json");
+const BASHRC = path.join(os.homedir(), ".bashrc");
+
+// Upsert `export KEY="value"` into ~/.bashrc so interactive terminals get it.
+// Idempotent: replaces any existing export line for the key. Best-effort.
+function persistShellEnv(key: string, value: string): boolean {
+  try {
+    const line = `export ${key}="${value}"`;
+    let content = existsSync(BASHRC) ? readFileSync(BASHRC, "utf8") : "";
+    const re = new RegExp(`^export ${key}=.*$`, "m");
+    content = re.test(content)
+      ? content.replace(re, line)
+      : content.replace(/\n*$/, "\n") + line + "\n";
+    writeFileSync(BASHRC, content);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Persist the API key so (a) the rest of this wizard run (the step-4 smoke test)
-// can use it, and (b) the bot picks it up: app.py / bridge.py load the bridge
-// .env, and the claude subprocess they spawn inherits ANTHROPIC_API_KEY.
-function persistApiKey(key: string): { wroteEnv: boolean } {
+// can use it, (b) the bot picks it up — app.py / bridge.py load the bridge .env
+// and the claude subprocess they spawn inherits ANTHROPIC_API_KEY — and (c) a
+// human running `claude` in any terminal is authorized (via ~/.bashrc), which
+// the bridge .env alone does NOT cover.
+function persistApiKey(key: string): { wroteEnv: boolean; wroteShell: boolean } {
   process.env.ANTHROPIC_API_KEY = key;
-  return { wroteEnv: upsertBridgeEnv("ANTHROPIC_API_KEY", key) };
+  return {
+    wroteEnv: upsertBridgeEnv("ANTHROPIC_API_KEY", key),
+    wroteShell: persistShellEnv("ANTHROPIC_API_KEY", key),
+  };
 }
 
 /** Step 2 — authenticate the agent against the user's Claude account. */
@@ -62,11 +85,18 @@ export const authenticateAgent: Step = {
               : "Expected a key starting with sk-ant-",
         }),
       );
-      const { wroteEnv } = persistApiKey(key.trim());
+      const { wroteEnv, wroteShell } = persistApiKey(key.trim());
+      const where = [
+        wroteEnv ? "the bot's .env" : null,
+        wroteShell ? "~/.bashrc (new terminals)" : null,
+        "this session",
+      ]
+        .filter(Boolean)
+        .join(", ");
       p.log.success(
-        wroteEnv
-          ? "API key saved to the bot's .env and this session — Claude Code will use it."
-          : "API key set for this session (bridge dir not found, so nothing persisted to disk).",
+        wroteEnv || wroteShell
+          ? `API key saved to ${where} — Claude Code will use it (open a new terminal for an existing shell to pick it up).`
+          : "API key set for this session only (couldn't persist to disk).",
       );
       if (wroteEnv) await restartBridge();
       return;
