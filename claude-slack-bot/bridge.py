@@ -324,11 +324,28 @@ def _configure_git_credentials(token: str) -> None:
         log.warning("could not configure git credentials: %s", e)
 
 
+def _configure_git_identity(name: str, email: str) -> None:
+    """Set the global git author/committer identity so commits read as the bot
+    (e.g. "Cosmo") rather than the codespace's default git user. The email is
+    GitHub's bot noreply form so commits link back to the bot account."""
+    try:
+        subprocess.run(
+            ["git", "config", "--global", "user.name", name], check=True
+        )
+        subprocess.run(
+            ["git", "config", "--global", "user.email", email], check=True
+        )
+    except Exception as e:  # noqa: BLE001 - best-effort
+        log.warning("could not configure git identity: %s", e)
+
+
 def handle_github_token(payload: dict[str, Any]) -> None:
     """Apply a bot installation token pushed by Central over Ably: set GH_TOKEN
     (process env + .env so future agent spawns inherit it) and configure git so
-    the agent's git/gh act as the App's bot. Expiry is ignored for now — Central
-    re-publishes a fresh token at create/wake; no in-codespace refresh yet."""
+    the agent's git/gh act as the App's bot. When Central includes the bot
+    name/email, also set the git commit identity ("Cosmo"). Expiry is ignored for
+    now — Central re-publishes a fresh token at create/wake; no in-codespace
+    refresh yet."""
     token = (payload or {}).get("token")
     if not token or not isinstance(token, str):
         log.warning("github.token event missing token")
@@ -336,8 +353,13 @@ def handle_github_token(payload: dict[str, Any]) -> None:
     os.environ["GH_TOKEN"] = token
     _upsert_env_file("GH_TOKEN", token)
     _configure_git_credentials(token)
+    name = (payload or {}).get("name")
+    email = (payload or {}).get("email")
+    if isinstance(name, str) and name and isinstance(email, str) and email:
+        _configure_git_identity(name, email)
     log.info(
-        "applied github bot token (GH_TOKEN + git creds); expires %s",
+        "applied github bot token (GH_TOKEN + git creds%s); expires %s",
+        " + identity" if (name and email) else "",
         (payload or {}).get("expires_at"),
     )
 
