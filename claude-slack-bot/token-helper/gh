@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# `gh` shim — ensures a fresh GH_TOKEN before handing off to the real gh.
+#
+# gh reads GH_TOKEN at process start; a long-running agent process holds a stale
+# one in its env. This shim (placed earlier on PATH than the real binary) sets a
+# just-refreshed token from coderbots-token, then exec's the real gh. gh's own
+# git operations still flow through the git credential helper; this covers gh's
+# REST calls (pr create, api, issue comment).
+set -uo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+token_bin="$here/coderbots-token"
+[ -x "$token_bin" ] || token_bin="coderbots-token"
+
+# REAL_GH is recorded by bridge.py (resolved before this shim shadowed gh on PATH).
+cfg="${CODERBOTS_PULL_ENV:-$HOME/.config/coderbots/pull.env}"
+real_gh=""
+[ -f "$cfg" ] && real_gh="$(sed -n 's/^REAL_GH=//p' "$cfg" | tail -1)"
+
+# Fallback: scan PATH for a gh that isn't this shim.
+if [ -z "$real_gh" ] || [ ! -x "$real_gh" ]; then
+  self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+  IFS=:
+  for d in $PATH; do
+    cand="$d/gh"
+    if [ -x "$cand" ] && [ "$(readlink -f "$cand" 2>/dev/null || echo "$cand")" != "$self" ]; then
+      real_gh="$cand"; break
+    fi
+  done
+  unset IFS
+fi
+
+if [ -z "$real_gh" ] || [ ! -x "$real_gh" ]; then
+  echo "coderbots gh shim: real gh not found" >&2
+  exit 127
+fi
+
+tok="$("$token_bin" 2>/dev/null || true)"
+[ -n "$tok" ] && export GH_TOKEN="$tok"
+
+exec "$real_gh" "$@"

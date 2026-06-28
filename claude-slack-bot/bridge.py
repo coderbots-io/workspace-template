@@ -28,10 +28,12 @@ import logging
 import os
 import random
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from typing import Any, Optional
 
 import aiohttp
@@ -304,24 +306,125 @@ def _upsert_env_file(key: str, value: str) -> None:
         f.write("\n".join(lines) + "\n")
 
 
-def _configure_git_credentials(token: str) -> None:
-    """Point git's global credential store at the bot token for github.com, so
-    all git ops (clone/push) authenticate as the App's bot."""
+# --- Bot-token refresh plumbing ----------------------------------------------
+# `ghs_` installation tokens expire in 1h. Rather than rely solely on a token
+# pushed over Ably at create/wake, we install a git credential helper + a `gh`
+# shim (token-helper/) that PULL a fresh token from Central on demand when the
+# cached one nears expiry (see token-helper/coderbots-token). The Ably-delivered
+# token still seeds the cache so the first op is instant. This file owns:
+#   ~/.git-credentials              boot/fallback token (git `store`; helper last resort)
+#   ~/.cache/coderbots/gh-token(.exp)  the helper/shim cache
+#   ~/.config/coderbots/pull.env    CENTRAL_TOKEN_URL / CENTRAL_PULL_SECRET / REAL_GH
+
+
+def _token_helper_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "token-helper")
+
+
+def _write_git_credentials(token: str) -> None:
+    """Write the boot/fallback token to git's credential store file. Our helper
+    refreshes live; this file is its last-resort fallback (and what the static
+    `store` helper uses on old checkouts without the helper scripts)."""
     try:
-        subprocess.run(
-            ["git", "config", "--global", "--replace-all", "credential.helper", ""],
-            check=False,
-        )
-        subprocess.run(
-            ["git", "config", "--global", "--add", "credential.helper", "store"],
-            check=True,
-        )
         cred_path = os.path.join(os.path.expanduser("~"), ".git-credentials")
         with open(cred_path, "w") as f:
             f.write(f"https://x-access-token:{token}@github.com\n")
         os.chmod(cred_path, 0o600)
     except Exception as e:  # noqa: BLE001 - best-effort
-        log.warning("could not configure git credentials: %s", e)
+        log.warning("could not write git credentials: %s", e)
+
+
+def _write_token_cache(token: str, expires_at: Optional[str]) -> None:
+    """Seed the helper/shim cache so a freshly delivered token is served without
+    a pull. expires_at is GitHub's ISO ('…Z'); fall back to ~55m if absent."""
+    try:
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache/coderbots")
+        os.makedirs(cache_dir, exist_ok=True)
+        if expires_at:
+            exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
+        else:
+            exp = time.time() + 55 * 60
+        old = os.umask(0o077)
+        try:
+            for path, val in (
+                (os.path.join(cache_dir, "gh-token"), token),
+                (os.path.join(cache_dir, "gh-token.exp"), str(int(exp))),
+            ):
+                with open(path, "w") as f:
+                    f.write(val)
+        finally:
+            os.umask(old)
+    except Exception as e:  # noqa: BLE001 - best-effort
+        log.warning("could not write token cache: %s", e)
+
+
+def install_token_plumbing() -> None:
+    """Install the git credential helper + `gh` shim so the agent always uses a
+    fresh bot token (1h refresh). Called once at startup, before any session.
+    Falls back to git's static `store` helper if the helper scripts are missing
+    (old checkout)."""
+    helper_dir = _token_helper_dir()
+    token_script = os.path.join(helper_dir, "coderbots-token")
+    cred_helper = os.path.join(helper_dir, "coderbots-git-credential")
+    gh_shim = os.path.join(helper_dir, "gh")
+    scripts_present = all(os.path.exists(p) for p in (token_script, cred_helper, gh_shim))
+
+    # Resolve the REAL gh BEFORE the shim shadows it on PATH, so the shim can exec it.
+    real_gh = shutil.which("gh") or ""
+
+    # Write the pull config the helper/shim read.
+    try:
+        cfg_path = os.path.join(os.path.expanduser("~"), ".config/coderbots/pull.env")
+        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+        lines = [
+            f"{k}={os.environ[k]}"
+            for k in ("CENTRAL_TOKEN_URL", "CENTRAL_PULL_SECRET")
+            if os.environ.get(k)
+        ]
+        if real_gh:
+            lines.append(f"REAL_GH={real_gh}")
+        old = os.umask(0o077)
+        try:
+            with open(cfg_path, "w") as f:
+                f.write("\n".join(lines) + "\n")
+        finally:
+            os.umask(old)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not write pull config: %s", e)
+
+    if not scripts_present:
+        # Old checkout: keep git's static store helper so the boot token still works.
+        subprocess.run(
+            ["git", "config", "--global", "--replace-all", "credential.helper", "store"],
+            check=False,
+        )
+        log.warning("token-helper scripts missing in %s; using static git store helper", helper_dir)
+        return
+
+    for p in (token_script, cred_helper, gh_shim):
+        try:
+            os.chmod(p, 0o755)
+        except OSError:
+            pass
+    # Point git at our credential helper for all hosts (it self-refreshes and
+    # falls back to the boot token). replace-all clears the old `store` helper.
+    try:
+        subprocess.run(
+            ["git", "config", "--global", "--replace-all",
+             "credential.helper", f"!{cred_helper}"],
+            check=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not set git credential helper: %s", e)
+    # Prepend the shim dir so the agent's `gh` resolves to our wrapper.
+    os.environ["PATH"] = helper_dir + os.pathsep + os.environ.get("PATH", "")
+    log.info("installed token plumbing (git helper + gh shim); real gh=%s", real_gh or "<none>")
+    # Warm the cache (best-effort) so the first git/gh op doesn't pay a pull.
+    try:
+        subprocess.run([token_script], check=False, timeout=15,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _configure_git_identity(name: str, email: str) -> None:
@@ -340,27 +443,29 @@ def _configure_git_identity(name: str, email: str) -> None:
 
 
 def handle_github_token(payload: dict[str, Any]) -> None:
-    """Apply a bot installation token pushed by Central over Ably: set GH_TOKEN
-    (process env + .env so future agent spawns inherit it) and configure git so
-    the agent's git/gh act as the App's bot. When Central includes the bot
-    name/email, also set the git commit identity ("Cosmo"). Expiry is ignored for
-    now — Central re-publishes a fresh token at create/wake; no in-codespace
-    refresh yet."""
+    """Apply a bot installation token pushed by Central over Ably. This seeds the
+    token cache + boot/fallback credentials so the agent's git/gh act as the App's
+    bot immediately; the credential helper + gh shim (installed at startup) then
+    keep it fresh by pulling from Central as it nears the 1h expiry. Sets GH_TOKEN
+    in env/.env for new spawns, writes the cache + git store, and applies the bot
+    commit identity ("Cosmo") when Central includes name/email."""
     token = (payload or {}).get("token")
     if not token or not isinstance(token, str):
         log.warning("github.token event missing token")
         return
+    expires_at = (payload or {}).get("expires_at")
     os.environ["GH_TOKEN"] = token
     _upsert_env_file("GH_TOKEN", token)
-    _configure_git_credentials(token)
+    _write_git_credentials(token)
+    _write_token_cache(token, expires_at if isinstance(expires_at, str) else None)
     name = (payload or {}).get("name")
     email = (payload or {}).get("email")
     if isinstance(name, str) and name and isinstance(email, str) and email:
         _configure_git_identity(name, email)
     log.info(
-        "applied github bot token (GH_TOKEN + git creds%s); expires %s",
+        "applied github bot token (env + git creds + cache%s); expires %s",
         " + identity" if (name and email) else "",
-        (payload or {}).get("expires_at"),
+        expires_at,
     )
 
 
@@ -546,6 +651,11 @@ async def wait_for_config(poll_secs: float = 3.0) -> tuple[str, str]:
 async def main() -> None:
     ably_key, slack_token = await wait_for_config()
     channel_name = resolve_channel()
+
+    # Install the git credential helper + gh shim now (before any session spawns)
+    # so the agent always uses a fresh bot token. Reads CENTRAL_TOKEN_URL /
+    # CENTRAL_PULL_SECRET that wait_for_config loaded from the provisioned .env.
+    install_token_plumbing()
 
     sessions = build_session_manager()
     slack = AsyncWebClient(token=slack_token)

@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Print a currently-valid GitHub bot token to stdout, refreshing on demand.
+
+This is the single source of truth for the in-codespace token cache. The git
+credential helper and the `gh` shim both call it. It is lazy: it only hits
+Central when the cached `ghs_` token is within SKEW seconds of expiry, and it
+coalesces concurrent refreshes behind a file lock. On any pull failure it falls
+back to the cached token (and, last resort, the boot token in ~/.git-credentials)
+rather than failing — a maybe-stale token beats none.
+
+Config (written by bridge.py at startup, from the provisioned bridge .env):
+  ~/.config/coderbots/pull.env   CENTRAL_TOKEN_URL, CENTRAL_PULL_SECRET, REAL_GH
+Cache:
+  ~/.cache/coderbots/gh-token        the token
+  ~/.cache/coderbots/gh-token.exp    expiry, epoch seconds
+  ~/.cache/coderbots/gh-token.lock   flock for refresh coalescing
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+
+SKEW = 300  # refresh when within 5 min of expiry
+HTTP_TIMEOUT = 10
+
+HOME = os.path.expanduser("~")
+CONFIG = os.environ.get("CODERBOTS_PULL_ENV", os.path.join(HOME, ".config/coderbots/pull.env"))
+CACHE_DIR = os.path.join(HOME, ".cache/coderbots")
+TOK = os.path.join(CACHE_DIR, "gh-token")
+EXP = os.path.join(CACHE_DIR, "gh-token.exp")
+LOCK = os.path.join(CACHE_DIR, "gh-token.lock")
+
+
+def _read_config() -> dict[str, str]:
+    cfg: dict[str, str] = {}
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def _read_cache() -> tuple[str | None, float]:
+    try:
+        with open(TOK) as f:
+            tok = f.read().strip()
+        with open(EXP) as f:
+            exp = float(f.read().strip())
+        return (tok or None), exp
+    except (FileNotFoundError, ValueError):
+        return None, 0.0
+
+
+def _write_cache(tok: str, exp_epoch: float) -> None:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    old = os.umask(0o077)
+    try:
+        for path, val in ((TOK, tok), (EXP, str(int(exp_epoch)))):
+            tmp = f"{path}.tmp"
+            with open(tmp, "w") as f:
+                f.write(val)
+            os.replace(tmp, path)
+    finally:
+        os.umask(old)
+
+
+def _iso_to_epoch(s: str) -> float:
+    # GitHub returns e.g. "2026-06-28T18:30:00Z"; tolerate the trailing Z.
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+
+
+def _boot_token() -> str | None:
+    """Last-resort fallback: the boot token bridge.py writes to git's store."""
+    try:
+        with open(os.path.join(HOME, ".git-credentials")) as f:
+            for line in f:
+                line = line.strip()
+                # https://x-access-token:<token>@github.com
+                if "x-access-token:" in line and "@github.com" in line:
+                    return line.split("x-access-token:", 1)[1].split("@", 1)[0]
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def _pull(cfg: dict[str, str]) -> bool:
+    url = cfg.get("CENTRAL_TOKEN_URL")
+    secret = cfg.get("CENTRAL_PULL_SECRET")
+    if not url or not secret:
+        return False
+    req = urllib.request.Request(
+        url, method="POST", headers={"Authorization": f"Bearer {secret}"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            data = json.load(resp)
+        tok = data.get("token")
+        exp = data.get("expires_at")
+        if tok and exp:
+            _write_cache(tok, _iso_to_epoch(exp))
+            return True
+    except (urllib.error.URLError, ValueError, OSError):
+        pass
+    return False
+
+
+def main() -> int:
+    tok, exp = _read_cache()
+    if tok and time.time() < exp - SKEW:
+        sys.stdout.write(tok)
+        return 0
+
+    # Stale or missing — refresh under a lock so concurrent git/gh calls coalesce.
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    import fcntl
+
+    with open(LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        tok, exp = _read_cache()  # someone may have refreshed while we waited
+        if not (tok and time.time() < exp - SKEW):
+            _pull(_read_config())
+            tok, exp = _read_cache()
+
+    if not tok:
+        tok = _boot_token()
+    if not tok:
+        return 1
+    sys.stdout.write(tok)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
