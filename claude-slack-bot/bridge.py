@@ -29,6 +29,7 @@ import os
 import random
 import re
 import signal
+import subprocess
 import tempfile
 import time
 from typing import Any, Optional
@@ -285,6 +286,62 @@ async def handle_session_clear(payload: dict[str, Any], sessions: SessionManager
     log.info("session.clear thread=%s cleared=%s", thread_key, cleared)
 
 
+def _bridge_env_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def _upsert_env_file(key: str, value: str) -> None:
+    """Replace/append KEY=value in the bridge .env, preserving other lines, so a
+    bridge restart (or a freshly spawned agent) inherits it."""
+    path = _bridge_env_path()
+    try:
+        with open(path, "r") as f:
+            lines = [ln for ln in f.read().splitlines() if not ln.startswith(f"{key}=")]
+    except FileNotFoundError:
+        lines = []
+    lines.append(f"{key}={value}")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _configure_git_credentials(token: str) -> None:
+    """Point git's global credential store at the bot token for github.com, so
+    all git ops (clone/push) authenticate as the App's bot."""
+    try:
+        subprocess.run(
+            ["git", "config", "--global", "--replace-all", "credential.helper", ""],
+            check=False,
+        )
+        subprocess.run(
+            ["git", "config", "--global", "--add", "credential.helper", "store"],
+            check=True,
+        )
+        cred_path = os.path.join(os.path.expanduser("~"), ".git-credentials")
+        with open(cred_path, "w") as f:
+            f.write(f"https://x-access-token:{token}@github.com\n")
+        os.chmod(cred_path, 0o600)
+    except Exception as e:  # noqa: BLE001 - best-effort
+        log.warning("could not configure git credentials: %s", e)
+
+
+def handle_github_token(payload: dict[str, Any]) -> None:
+    """Apply a bot installation token pushed by Central over Ably: set GH_TOKEN
+    (process env + .env so future agent spawns inherit it) and configure git so
+    the agent's git/gh act as the App's bot. Expiry is ignored for now — Central
+    re-publishes a fresh token at create/wake; no in-codespace refresh yet."""
+    token = (payload or {}).get("token")
+    if not token or not isinstance(token, str):
+        log.warning("github.token event missing token")
+        return
+    os.environ["GH_TOKEN"] = token
+    _upsert_env_file("GH_TOKEN", token)
+    _configure_git_credentials(token)
+    log.info(
+        "applied github bot token (GH_TOKEN + git creds); expires %s",
+        (payload or {}).get("expires_at"),
+    )
+
+
 async def dispatch(
     name: Optional[str],
     payload: Any,
@@ -304,6 +361,8 @@ async def dispatch(
         await handle_user_message(payload, sessions, slack)
     elif name == "session.clear":
         await handle_session_clear(payload, sessions)
+    elif name == "github.token":
+        handle_github_token(payload)
     else:
         log.debug("ignoring message name=%s", name)
 
