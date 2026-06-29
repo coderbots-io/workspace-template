@@ -94,8 +94,13 @@ def build_session_manager() -> SessionManager:
     extra_args: dict[str, str | None] = {}
     if _truthy(os.getenv("CLAUDE_CHROME", "1")):
         extra_args["chrome"] = None
+    # Start each thread's Claude in $HOME (not the bridge's own dir under
+    # claude-slack-bot). Each Slack thread gets its own Session/ClaudeSDKClient
+    # built with this cwd, so this is the working directory at the start of a
+    # thread. Overridable via CLAUDE_CWD.
+    cwd = os.getenv("CLAUDE_CWD") or os.path.expanduser("~")
     return SessionManager(
-        cwd=os.getcwd(),
+        cwd=cwd,
         permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
         model=os.getenv("CLAUDE_MODEL") or None,
         setting_sources=_parse_sources(

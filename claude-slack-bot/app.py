@@ -160,9 +160,9 @@ long paragraphs."""
 
 
 sessions = SessionManager(
-    # Run each claude subprocess in the directory the bot was launched from.
-    # `cd` to the repo/project you want the agent to work in, then start the bot.
-    cwd=os.getcwd(),
+    # Start each thread's claude subprocess in $HOME (overridable via CLAUDE_CWD).
+    # Kept in sync with bridge.py's build_session_manager().
+    cwd=os.getenv("CLAUDE_CWD") or os.path.expanduser("~"),
     permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
     model=os.getenv("CLAUDE_MODEL") or None,
     setting_sources=_parse_sources(
