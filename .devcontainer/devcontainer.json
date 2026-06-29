@@ -29,9 +29,17 @@
   // desktop launched right then dies with EADDRINUSE — is handled by
   // start-desktop.sh, which retries until the pre-bind releases and KasmVNC
   // binds (post-boot 6080 is reliably free).
-  "forwardPorts": [6080],
+  // 8787 is the bridge's log-stream WebSocket (claude-slack-bot/logserver.py),
+  // which Central's "Logs" page reads. Like 6080 it must be in forwardPorts so
+  // the forwarded URL (<codespace>-8787.app.github.dev) maps to it even though
+  // the codespace is started headlessly over `gh codespace ssh` with no editor
+  // client to auto-forward it. It stays PRIVATE — only requests carrying an
+  // X-Github-Token for someone with access to this codespace reach it (Central
+  // attaches that header when it proxies the stream).
+  "forwardPorts": [6080, 8787],
   "portsAttributes": {
-    "6080": { "label": "desktop (KasmVNC)", "onAutoForward": "openPreview" }
+    "6080": { "label": "desktop (KasmVNC)", "onAutoForward": "openPreview" },
+    "8787": { "label": "agent logs", "onAutoForward": "silent" }
   },
   "containerEnv": {
     "DISPLAY": ":1",

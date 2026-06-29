@@ -8,4 +8,5 @@ __pycache__/
 .ably-*.json
 .ably-*.json.tmp
 bridge.log
+logserver.log
 supervisord.log
