@@ -7,6 +7,8 @@ __pycache__/
 # Bridge runtime state/logs (written in the codespace)
 .ably-*.json
 .ably-*.json.tmp
+.sessions.json
+.sessions.json.tmp
 bridge.log
 logserver.log
 supervisord.log
