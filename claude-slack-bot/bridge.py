@@ -210,7 +210,93 @@ async def download_slack_files(
     return out
 
 
+# --- Idle keep-alive ---------------------------------------------------------
+# GitHub stops a codespace after its idle timeout with no terminal activity. A
+# busy agent produces none (its output goes to bridge.log, a file), so without
+# this a turn can be killed mid-flight. While any turn is in flight we POST to
+# Central's /activity endpoint; Central reaches back with a brief `gh codespace
+# ssh` whose terminal output resets the idle timer (the one thing that does —
+# API calls and forwarded-port traffic don't). When turns end, pings stop and
+# the codespace idles out normally.
+
+_active_turns = 0
+_turn_wake = asyncio.Event()  # set when a turn begins, to ping immediately
+
+
+def _begin_turn() -> None:
+    global _active_turns
+    _active_turns += 1
+    _turn_wake.set()
+
+
+def _end_turn() -> None:
+    global _active_turns
+    _active_turns = max(0, _active_turns - 1)
+
+
+def _activity_url() -> Optional[str]:
+    # Same base + codespace as the token-pull URL Central provisions, just a
+    # different endpoint — no extra config to provision.
+    base = os.environ.get("CENTRAL_TOKEN_URL")
+    return base.replace("/github-token", "/activity") if base else None
+
+
+async def _wait_either(ev: asyncio.Event, stop: asyncio.Event) -> None:
+    tasks = [asyncio.ensure_future(ev.wait()), asyncio.ensure_future(stop.wait())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+
+
+async def _sleep_or_stop(secs: float, stop: asyncio.Event) -> None:
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=secs)
+    except asyncio.TimeoutError:
+        pass
+
+
+async def keepalive_loop(stop: asyncio.Event) -> None:
+    url = _activity_url()
+    secret = os.environ.get("CENTRAL_PULL_SECRET")
+    if not url or not secret:
+        log.info("keepalive: disabled (no CENTRAL_TOKEN_URL / CENTRAL_PULL_SECRET)")
+        return
+    interval = float(os.getenv("KEEPALIVE_INTERVAL_SECS", "120"))
+    headers = {"Authorization": f"Bearer {secret}"}
+    log.info("keepalive: holding idle timer off via %s every %.0fs while busy", url, interval)
+    async with aiohttp.ClientSession() as http:
+        while not stop.is_set():
+            if _active_turns <= 0:
+                _turn_wake.clear()
+                if _active_turns <= 0:  # re-check after clear to avoid a lost wakeup
+                    await _wait_either(_turn_wake, stop)
+                continue
+            try:
+                async with http.post(
+                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                ) as r:
+                    if r.status != 200:
+                        log.warning("keepalive: ping -> HTTP %s", r.status)
+            except Exception as e:  # noqa: BLE001 — keep-alive must never crash the bridge
+                log.warning("keepalive: ping failed: %s", e)
+            await _sleep_or_stop(interval, stop)
+
+
 async def handle_user_message(
+    payload: dict[str, Any], sessions: SessionManager, slack: AsyncWebClient
+) -> None:
+    # Count this as an in-flight turn for its whole duration so the keep-alive
+    # holds GitHub's idle timer off, then releases it when the turn finishes.
+    _begin_turn()
+    try:
+        await _handle_user_message_inner(payload, sessions, slack)
+    finally:
+        _end_turn()
+
+
+async def _handle_user_message_inner(
     payload: dict[str, Any], sessions: SessionManager, slack: AsyncWebClient
 ) -> None:
     thread_key = payload.get("thread_key")
@@ -714,10 +800,13 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
 
+    keepalive = asyncio.create_task(keepalive_loop(stop))
+
     try:
         await run_consumer(ably_key, channel_name, sessions, slack, stop)
     finally:
         log.info("shutting down")
+        keepalive.cancel()
         await sessions.close_all()
 
 
