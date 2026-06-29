@@ -421,6 +421,22 @@ def install_token_plumbing() -> None:
         )
     except Exception as e:  # noqa: BLE001
         log.warning("could not set git credential helper: %s", e)
+    # GitHub Codespaces ALSO sets a github.com-SCOPED helper in ~/.gitconfig:
+    #   credential.https://github.com.helper =                       (empty: resets the list)
+    #   credential.https://github.com.helper = !/usr/bin/gh auth git-credential
+    # A URL-scoped helper, combined with that empty reset, OVERRIDES the generic
+    # credential.helper set above — so without this our helper never runs for
+    # github.com and git falls back to `gh` (the codespace token, which can only
+    # write to the workspace repo -> "Write access to repository not granted" 403
+    # on any other repo). Replace the github.com-scoped helpers with an empty
+    # reset + our helper so the bot token is used for all github.com git ops.
+    gh_scope_key = "credential.https://github.com.helper"
+    try:
+        subprocess.run(["git", "config", "--global", "--unset-all", gh_scope_key], check=False)
+        subprocess.run(["git", "config", "--global", "--add", gh_scope_key, ""], check=True)
+        subprocess.run(["git", "config", "--global", "--add", gh_scope_key, f"!{cred_helper}"], check=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not set github.com credential helper: %s", e)
     # Prepend the shim dir so the agent's `gh` resolves to our wrapper.
     os.environ["PATH"] = helper_dir + os.pathsep + os.environ.get("PATH", "")
     log.info("installed token plumbing (git helper + gh shim); real gh=%s", real_gh or "<none>")
