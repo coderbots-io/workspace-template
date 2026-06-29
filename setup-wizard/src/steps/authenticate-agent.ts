@@ -52,7 +52,7 @@ export const authenticateAgent: Step = {
     return existsSync(CREDENTIALS) || Boolean(process.env.ANTHROPIC_API_KEY);
   },
 
-  async run() {
+  async run(ctx) {
     const method = await ask(
       p.select({
         message: "How do you want to authenticate Claude Code?",
@@ -125,6 +125,12 @@ export const authenticateAgent: Step = {
     // TODO: if a confirmed non-interactive login command exists in the pinned
     // Claude Code version, prefer it over this interactive hand-off.
     await claude([]);
+
+    // This interactive run also clears Claude's one-time first-run prompts
+    // (trust folder, theme, extension consent), so the step-4 smoke test can
+    // skip its warm-up and run headless.
+    ctx.state.claudeInteractive = true;
+    await ctx.save();
 
     if (!existsSync(CREDENTIALS) && !process.env.ANTHROPIC_API_KEY) {
       throw new Error(
