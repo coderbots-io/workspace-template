@@ -2,7 +2,7 @@
 import * as p from "@clack/prompts";
 import { inspect } from "node:util";
 import { ask } from "./prompt.js";
-import { inDesktop } from "./env.js";
+import { inDesktop, hydrateApiKey } from "./env.js";
 import { ensureDesktop } from "./preflight.js";
 import { loadState, markComplete, saveState } from "./state.js";
 import { steps } from "./steps/index.js";
@@ -17,6 +17,12 @@ async function main() {
       "Not running inside an agent-dev-desktop Codespace — browser/agent steps may not behave as expected.",
     );
   }
+
+  // Pull a previously-saved Anthropic API key (bridge .env) into this process's
+  // env if the launching shell didn't — the VS Code task's bash is
+  // non-interactive and skips ~/.bashrc, so a resumed run would otherwise look
+  // unauthenticated and spawn an unauthenticated claude.
+  hydrateApiKey();
 
   const state = await loadState();
   const ctx: StepContext = {

@@ -1,5 +1,5 @@
 import { execa, type Options, type ResultPromise } from "execa";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,51 @@ function chromeEnabled(): boolean {
   return ["1", "true", "yes", "on"].includes(v);
 }
 
+/** Read a single KEY from the bot's bridge .env, or undefined if absent. */
+function readBridgeEnv(key: string): string | undefined {
+  try {
+    const file = path.join(BRIDGE_DIR, ".env");
+    if (!existsSync(file)) return undefined;
+    for (const raw of readFileSync(file, "utf8").split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq < 0) continue;
+      let k = line.slice(0, eq).trim();
+      if (k.startsWith("export ")) k = k.slice("export ".length).trim();
+      if (k !== key) continue;
+      let v = line.slice(eq + 1).trim();
+      if (
+        (v.startsWith('"') && v.endsWith('"')) ||
+        (v.startsWith("'") && v.endsWith("'"))
+      ) {
+        v = v.slice(1, -1);
+      }
+      return v;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+/**
+ * Load the Anthropic API key the auth step persisted into the bridge .env back
+ * into this process's env, if it isn't already set. The wizard is launched by
+ * the VS Code task's NON-interactive bash, which doesn't source ~/.bashrc — so
+ * on a fresh/resumed run process.env can lack ANTHROPIC_API_KEY even though the
+ * key was saved in a prior session. Call once at startup so the wizard (and
+ * every `claude` it spawns) is authenticated the same way a hand-run `claude`
+ * (which DOES source ~/.bashrc) is. Returns true if a key is now present.
+ */
+export function hydrateApiKey(): boolean {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    const fromBridge = readBridgeEnv("ANTHROPIC_API_KEY");
+    if (fromBridge) process.env.ANTHROPIC_API_KEY = fromBridge;
+  }
+  return Boolean(process.env.ANTHROPIC_API_KEY);
+}
+
 /**
  * Spawn `claude`, forcing BROWSER to the desktop Chrome so its OAuth/login
  * links open where the user can see them, and (unless CLAUDE_CHROME is off)
@@ -80,12 +125,23 @@ function chromeEnabled(): boolean {
  * without it Claude has no browser-control tools. The image's bashrc shim sets
  * BROWSER for interactive shells, but child processes don't inherit shell
  * functions, so we set both explicitly here.
+ *
+ * Also injects ANTHROPIC_API_KEY from the bridge .env when it isn't already in
+ * the environment — the wizard's launching shell is non-interactive and doesn't
+ * source ~/.bashrc, so without this a spawned claude can be unauthenticated even
+ * though a hand-run claude works.
  */
 export function claude(args: string[] = [], opts: Options = {}): ResultPromise {
   const finalArgs = chromeEnabled() ? ["--chrome", ...args] : args;
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? readBridgeEnv("ANTHROPIC_API_KEY");
   return run("claude", finalArgs, {
     ...opts,
-    env: { ...process.env, BROWSER: CHROME, ...(opts.env ?? {}) },
+    env: {
+      ...process.env,
+      BROWSER: CHROME,
+      ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}),
+      ...(opts.env ?? {}),
+    },
   });
 }
 
