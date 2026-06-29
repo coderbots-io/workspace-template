@@ -3,6 +3,7 @@ import * as p from "@clack/prompts";
 import { inspect } from "node:util";
 import { ask } from "./prompt.js";
 import { inDesktop, hydrateApiKey } from "./env.js";
+import { ensureClaudeDefaultMode } from "./claude-config.js";
 import { ensureDesktop } from "./preflight.js";
 import { loadState, markComplete, saveState } from "./state.js";
 import { steps } from "./steps/index.js";
@@ -23,6 +24,16 @@ async function main() {
   // non-interactive and skips ~/.bashrc, so a resumed run would otherwise look
   // unauthenticated and spawn an unauthenticated claude.
   hydrateApiKey();
+
+  // Default Claude Code to auto permission mode in this codespace so a plain
+  // `claude` run isn't blocked on tool approvals (the bridge and the wizard's
+  // own forks already pass it explicitly). User-scope only — Claude ignores
+  // defaultMode:"auto" in project-scoped settings.
+  if (ensureClaudeDefaultMode("auto").changed) {
+    p.log.info(
+      'Set Claude\'s default permission mode to "auto" (~/.claude/settings.json).',
+    );
+  }
 
   const state = await loadState();
   const ctx: StepContext = {
