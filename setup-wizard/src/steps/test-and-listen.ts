@@ -22,78 +22,39 @@ export const testAndListen: Step = {
 
     // --- First-run warm-up --------------------------------------------------
     // The smoke test below is headless (`claude -p`), which can't answer Claude
-    // Code's one-time first-run prompts (trust this folder, pick a theme). If
-    // Claude hasn't been run interactively yet this setup (e.g. the user
-    // authenticated with an API key rather than the browser login), get that
-    // first run out of the way first.
+    // Code's one-time first-run prompts (trust this folder, pick a theme, and —
+    // in extension mode — allow the Chrome extension). If Claude hasn't been run
+    // interactively yet this setup (e.g. the user authenticated with an API key
+    // rather than the browser login), hand this terminal to interactive Claude
+    // once so they can clear those prompts, then /exit straight back here.
     if (!ctx.state.claudeInteractive) {
-      // In the VS Code editor we keep the wizard in its own terminal and send
-      // the user to a SEPARATE terminal tab for Claude (the "coderbots: Claude"
-      // task), so the wizard's instructions stay on screen. Over plain SSH (no
-      // VS Code) there's only one terminal, so we hand it over inline instead.
-      const inVsCode = process.env.TERM_PROGRAM === "vscode";
+      p.note(
+        [
+          "The first time Claude Code runs it asks a few one-time questions",
+          `(trust this folder, choose a theme${devtools ? "" : ", allow the Chrome extension"}).`,
+          "A headless test can't answer those, so let's open Claude interactively",
+          "once to get them out of the way — this is the real agent you'll chat with.",
+          "",
+          "When you reach Claude's prompt, type /exit to come right back here and",
+          "run the smoke test.",
+        ].join("\n"),
+        "First run of Claude",
+      );
 
-      if (inVsCode) {
-        p.note(
-          [
-            "The first time Claude Code runs it asks a couple of one-time",
-            "questions (trust this folder, choose a theme). A headless test",
-            "can't answer those, so run Claude once in its own terminal first:",
-            "",
-            "  1. Terminal → Run Task… → “coderbots: Claude”",
-            "     (or open a new terminal with Ctrl/Cmd+Shift+` and run: claude)",
-            "  2. Answer the first-run questions until you reach Claude's prompt.",
-            "  3. Type /exit, then come back to THIS terminal.",
-            "",
-            "This is the real agent you'll chat with — leave that tab open to",
-            "talk to it any time.",
-          ].join("\n"),
-          "First run of Claude",
-        );
-
-        // Block here until the user confirms they've finished the first run.
-        // Loop so an accidental "no" just re-asks rather than skipping setup.
-        for (;;) {
-          const done = await ask(
-            p.confirm({
-              message: "Finished Claude's first run in the other terminal?",
-              initialValue: true,
-            }),
-          );
-          if (done) break;
-          p.log.info(
-            'Run the "coderbots: Claude" task, complete the questions, then /exit.',
-          );
+      const warmUp = await ask(
+        p.confirm({
+          message: "Open Claude interactively to finish first-time setup?",
+          initialValue: true,
+        }),
+      );
+      if (warmUp) {
+        try {
+          await claude([]);
+        } catch {
+          p.log.warn("Interactive Claude exited with an error; continuing.");
         }
         ctx.state.claudeInteractive = true;
         await ctx.save();
-      } else {
-        p.note(
-          [
-            "The first time Claude Code runs it asks a couple of one-time",
-            "questions (trust this folder, choose a theme). A headless test",
-            "can't answer those, so we'll open Claude interactively once.",
-            "",
-            "When you reach Claude's prompt, type /exit to come right back here.",
-          ].join("\n"),
-          "First run of Claude",
-        );
-
-        const warmUp = await ask(
-          p.confirm({
-            message: "Open Claude interactively to finish first-time setup?",
-            initialValue: true,
-          }),
-        );
-        if (warmUp) {
-          try {
-            await claude([]);
-          } catch {
-            p.log.warn("Interactive Claude exited with an error; continuing.");
-          }
-          ctx.state.claudeInteractive = true;
-          await ctx.save();
-        }
       }
     }
 

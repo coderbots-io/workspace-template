@@ -21,27 +21,6 @@
         "clear": true
       },
       "problemMatcher": []
-    },
-    {
-      // Opens an interactive Claude Code session in its OWN integrated-terminal
-      // tab. The setup wizard points the user here for Claude's one-time first
-      // run (trust this folder, choose a theme) — which a headless `claude -p`
-      // smoke test can't answer — without taking over the wizard's own terminal.
-      // Run it from Terminal → Run Task → "coderbots: Claude". Plain `claude`
-      // (no --chrome) so it's safe regardless of which browser-control mode was
-      // chosen; BROWSER is the desktop Chrome so any auth links open on the
-      // KasmVNC desktop.
-      "label": "coderbots: Claude",
-      "type": "shell",
-      "command": "claude",
-      "options": { "env": { "BROWSER": "/usr/local/bin/google-chrome" } },
-      "presentation": {
-        "reveal": "always",
-        "focus": true,
-        "panel": "dedicated",
-        "clear": true
-      },
-      "problemMatcher": []
     }
   ]
 }
