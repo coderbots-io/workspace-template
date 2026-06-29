@@ -3,6 +3,7 @@ import { installAgent } from "./install-agent.js";
 import { authenticateAgent } from "./authenticate-agent.js";
 import { installExtension } from "./install-extension.js";
 import { testAndListen } from "./test-and-listen.js";
+import { demoApp } from "./demo-app.js";
 import { pickRepo } from "./pick-repo.js";
 
 /** Ordered list of wizard steps. */
@@ -11,5 +12,6 @@ export const steps: Step[] = [
   authenticateAgent,
   installExtension,
   testAndListen,
+  demoApp,
   pickRepo,
 ];
