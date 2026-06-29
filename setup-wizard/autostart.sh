@@ -12,4 +12,13 @@ if [ ! -d node_modules ]; then
 fi
 
 export CODERBOTS_AUTOSTART=1
-exec npm run dev
+# Run the wizard. Don't `exec` it: when it finishes we want to KEEP this
+# terminal open (so its final output/instructions stay on screen and you have a
+# ready shell), rather than letting the VS Code task terminal close. `|| true`
+# so a non-zero exit doesn't abort before we hand off to the shell.
+npm run dev || true
+
+# Hand the panel over to an interactive login shell so the terminal stays open
+# and usable in the workspace directory after setup.
+cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null || echo "$HOME")"
+exec bash -l
