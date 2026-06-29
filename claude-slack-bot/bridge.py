@@ -653,14 +653,42 @@ async def wait_for_config(poll_secs: float = 3.0) -> tuple[str, str]:
         await asyncio.sleep(poll_secs)
 
 
+async def _wait_for_token_pull_config(
+    poll_secs: float = 3.0, timeout_secs: float = 300.0
+) -> bool:
+    """Wait until Central's token-pull config (CENTRAL_TOKEN_URL +
+    CENTRAL_PULL_SECRET) is present in .env, re-reading it each poll. Provisioning
+    writes this before the gate keys and independently of Slack, so it lets us
+    install the git credential plumbing before Slack is connected. Bounded: if it
+    never arrives (e.g. an old codespace without token-pull) give up and let the
+    Ably-delivered boot token seed the helper after config instead."""
+    deadline = time.time() + timeout_secs
+    while True:
+        load_dotenv(override=True)
+        if os.environ.get("CENTRAL_TOKEN_URL") and os.environ.get("CENTRAL_PULL_SECRET"):
+            return True
+        if time.time() >= deadline:
+            log.warning(
+                "token-pull config not present after %.0fs; installing plumbing "
+                "anyway (boot token seeds it after config)", timeout_secs,
+            )
+            return False
+        await asyncio.sleep(poll_secs)
+
+
 async def main() -> None:
+    # Install the git credential helper + gh shim BEFORE waiting on Slack config.
+    # Git auth must not depend on Slack: the helper only needs Central's token-pull
+    # config (provisioned before the gate keys), so the codespace's git — terminal
+    # AND agent — uses the bot token even before a teammate's Slack app is
+    # connected. Previously this ran only after wait_for_config() (which blocks on
+    # SLACK_BOT_TOKEN), so until Slack was connected git fell back to the read-only
+    # Codespaces token -> "Write access to repository not granted" (403) on push.
+    await _wait_for_token_pull_config()
+    install_token_plumbing()
+
     ably_key, slack_token = await wait_for_config()
     channel_name = resolve_channel()
-
-    # Install the git credential helper + gh shim now (before any session spawns)
-    # so the agent always uses a fresh bot token. Reads CENTRAL_TOKEN_URL /
-    # CENTRAL_PULL_SECRET that wait_for_config loaded from the provisioned .env.
-    install_token_plumbing()
 
     sessions = build_session_manager()
     slack = AsyncWebClient(token=slack_token)
