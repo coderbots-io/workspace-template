@@ -132,7 +132,14 @@ export function hydrateApiKey(): boolean {
  * though a hand-run claude works.
  */
 export function claude(args: string[] = [], opts: Options = {}): ResultPromise {
-  const finalArgs = chromeEnabled() ? ["--chrome", ...args] : args;
+  // Always run with auto permission mode so the agent isn't blocked on tool
+  // approvals (the headless smoke test can't answer prompts, and the demo/setup
+  // runs should just proceed). Matches the bridge's CLAUDE_PERMISSION_MODE.
+  const finalArgs = [
+    "--permission-mode=auto",
+    ...(chromeEnabled() ? ["--chrome"] : []),
+    ...args,
+  ];
   const apiKey = process.env.ANTHROPIC_API_KEY ?? readBridgeEnv("ANTHROPIC_API_KEY");
   return run("claude", finalArgs, {
     ...opts,

@@ -163,7 +163,7 @@ sessions = SessionManager(
     # Start each thread's claude subprocess in $HOME (overridable via CLAUDE_CWD).
     # Kept in sync with bridge.py's build_session_manager().
     cwd=os.getenv("CLAUDE_CWD") or os.path.expanduser("~"),
-    permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
+    permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "auto"),
     model=os.getenv("CLAUDE_MODEL") or None,
     setting_sources=_parse_sources(
         os.getenv("CLAUDE_SETTING_SOURCES", "user,project,local")
