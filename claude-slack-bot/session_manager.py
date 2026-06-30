@@ -29,6 +29,52 @@ from claude_agent_sdk.types import (
 
 log = logging.getLogger("claude-slack-bot.session")
 
+
+def load_cli_mcp_servers(cwd: Optional[str] = None) -> dict[str, dict]:
+    """Return the MCP servers configured for the `claude` CLI so the Agent SDK
+    can use the same ones.
+
+    The SDK starts its own `claude` subprocess and does NOT inherit the MCP
+    servers you've added with `claude mcp add` — those live in `~/.claude.json`
+    (and project `.mcp.json` files), which the SDK never reads on its own. We
+    load them here and pass them to ClaudeAgentOptions(mcp_servers=...).
+
+    Sources, merged in increasing precedence:
+      1. user scope     — top-level `mcpServers` in ~/.claude.json
+      2. project scope  — `mcpServers` under projects[cwd] in ~/.claude.json
+      3. project file   — a `.mcp.json` ({"mcpServers": {...}}) in cwd
+
+    The entry shapes in these files ({"type": "stdio"|"http"|"sse", "command",
+    "args", "env", "url", "headers"}) already match what the SDK expects, so we
+    pass them straight through.
+    """
+    servers: dict[str, dict] = {}
+    home_config = os.path.expanduser("~/.claude.json")
+    try:
+        with open(home_config) as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        log.info("no claude CLI config at %s (%s); no MCP servers loaded", home_config, e)
+        data = {}
+
+    servers.update(data.get("mcpServers") or {})
+
+    if cwd:
+        project = (data.get("projects") or {}).get(os.path.abspath(cwd)) or {}
+        servers.update(project.get("mcpServers") or {})
+
+        dot_mcp = os.path.join(cwd, ".mcp.json")
+        try:
+            with open(dot_mcp) as f:
+                servers.update(json.load(f).get("mcpServers") or {})
+        except (FileNotFoundError, ValueError, OSError):
+            pass
+
+    if servers:
+        log.info("loaded %d MCP server(s) from claude CLI config: %s",
+                 len(servers), ", ".join(sorted(servers)))
+    return servers
+
 # Thread -> claude session_id map, persisted on the /workspaces volume (next to
 # this file) so it survives a codespace stop/start. Lets a restarted bridge
 # RESUME each thread's prior conversation (full transcript) instead of starting
@@ -278,12 +324,14 @@ class SessionManager:
         setting_sources: Optional[list[str]] = None,
         extra_args: Optional[dict[str, Optional[str]]] = None,
         system_prompt_append: Optional[str] = None,
+        mcp_servers: Optional[dict[str, dict]] = None,
     ):
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._model = model
         self._setting_sources = setting_sources
         self._extra_args = extra_args or {}
+        self._mcp_servers = mcp_servers or {}
         self._system_prompt_append = system_prompt_append
         self._sessions: dict[str, Session] = {}
         self._lock = asyncio.Lock()
@@ -328,6 +376,8 @@ class SessionManager:
             kwargs["model"] = self._model
         if self._setting_sources:
             kwargs["setting_sources"] = self._setting_sources
+        if self._mcp_servers:
+            kwargs["mcp_servers"] = self._mcp_servers
         if self._extra_args:
             kwargs["extra_args"] = dict(self._extra_args)
         if self._system_prompt_append:

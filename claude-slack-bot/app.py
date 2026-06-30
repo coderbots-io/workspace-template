@@ -33,7 +33,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_sdk.errors import SlackApiError
 
-from session_manager import SessionManager
+from session_manager import SessionManager, load_cli_mcp_servers
 
 # Slack rejects chat.update with `msg_too_long` well below the documented
 # 40k-char limit (heavy mrkdwn pushes it down further). Cap each message at
@@ -140,10 +140,19 @@ Keep output tight: Slack threads are narrow. Prefer short bulleted lists over
 long paragraphs."""
 
 
+_cwd = os.getenv("CLAUDE_CWD") or os.path.expanduser("~")
+# The Agent SDK starts its own `claude` subprocess and does NOT inherit the MCP
+# servers configured for the CLI (via `claude mcp add`, stored in ~/.claude.json
+# / project .mcp.json). Load them so the bot has the same MCP tools as the
+# `claude` command. Disable with CLAUDE_LOAD_CLI_MCP=0.
+_mcp_servers = (
+    load_cli_mcp_servers(_cwd) if _truthy(os.getenv("CLAUDE_LOAD_CLI_MCP", "1")) else {}
+)
+
 sessions = SessionManager(
     # Start each thread's claude subprocess in $HOME (overridable via CLAUDE_CWD).
     # Kept in sync with bridge.py's build_session_manager().
-    cwd=os.getenv("CLAUDE_CWD") or os.path.expanduser("~"),
+    cwd=_cwd,
     permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "auto"),
     model=os.getenv("CLAUDE_MODEL") or None,
     setting_sources=_parse_sources(
@@ -151,6 +160,7 @@ sessions = SessionManager(
     ),
     extra_args=_extra_args,
     system_prompt_append=SLACK_FORMATTING_PROMPT,
+    mcp_servers=_mcp_servers,
 )
 
 # Optional sidecar channel that gets a per-turn progress message (header,

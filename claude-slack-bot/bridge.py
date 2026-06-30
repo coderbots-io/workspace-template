@@ -42,7 +42,7 @@ from dotenv import load_dotenv
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 
-from session_manager import SessionManager
+from session_manager import SessionManager, load_cli_mcp_servers
 
 load_dotenv()
 
@@ -129,6 +129,14 @@ def build_session_manager() -> SessionManager:
     # built with this cwd, so this is the working directory at the start of a
     # thread. Overridable via CLAUDE_CWD.
     cwd = os.getenv("CLAUDE_CWD") or os.path.expanduser("~")
+    # The Agent SDK starts its own `claude` subprocess and does NOT inherit the
+    # MCP servers configured for the CLI (via `claude mcp add`, stored in
+    # ~/.claude.json / project .mcp.json). Load them and pass them through so the
+    # bot has the same MCP tools as the `claude` command. Disable with
+    # CLAUDE_LOAD_CLI_MCP=0.
+    mcp_servers = (
+        load_cli_mcp_servers(cwd) if _truthy(os.getenv("CLAUDE_LOAD_CLI_MCP", "1")) else {}
+    )
     return SessionManager(
         cwd=cwd,
         permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "auto"),
@@ -138,6 +146,7 @@ def build_session_manager() -> SessionManager:
         ),
         extra_args=extra_args,
         system_prompt_append=SLACK_FORMATTING_PROMPT,
+        mcp_servers=mcp_servers,
     )
 
 
