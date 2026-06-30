@@ -139,7 +139,11 @@ def build_session_manager() -> SessionManager:
     )
     return SessionManager(
         cwd=cwd,
-        permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "auto"),
+        # Headless: there's no approval UI in Slack/Ably, so anything needing
+        # permission (Write, MCP tools) would be silently denied in "auto"/
+        # "default". bypassPermissions is the only mode that works for an
+        # autonomous teammate (override via CLAUDE_PERMISSION_MODE).
+        permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
         model=os.getenv("CLAUDE_MODEL") or None,
         setting_sources=_parse_sources(
             os.getenv("CLAUDE_SETTING_SOURCES", "user,project,local")

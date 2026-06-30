@@ -153,7 +153,9 @@ sessions = SessionManager(
     # Start each thread's claude subprocess in $HOME (overridable via CLAUDE_CWD).
     # Kept in sync with bridge.py's build_session_manager().
     cwd=_cwd,
-    permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "auto"),
+    # Headless agent: no approval UI, so bypassPermissions is required (anything
+    # needing approval is silently denied otherwise). Kept in sync with bridge.py.
+    permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
     model=os.getenv("CLAUDE_MODEL") or None,
     setting_sources=_parse_sources(
         os.getenv("CLAUDE_SETTING_SOURCES", "user,project,local")
