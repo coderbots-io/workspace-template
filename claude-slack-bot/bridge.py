@@ -890,7 +890,36 @@ async def _wait_for_token_pull_config(
         await asyncio.sleep(poll_secs)
 
 
+def _ensure_node_on_path() -> None:
+    """Put node/npx on PATH so the Agent SDK can launch stdio MCP servers.
+
+    The SDK spawns each configured stdio MCP server via its command (e.g.
+    `npx chrome-devtools-mcp`). The bridge runs under supervisord with a
+    restricted PATH that lacks node/npx (installed via nvm), so those servers
+    fail to launch and their tools never reach the agent — while REMOTE MCP
+    connectors (no local command) work fine, which is why only local servers
+    went missing. Prepend nvm's stable `current` bin (falling back to the newest
+    versioned dir); the SDK subprocess inherits this process's PATH.
+    """
+    candidates = ["/usr/local/share/nvm/current/bin"]
+    versions = "/usr/local/share/nvm/versions/node"
+    if os.path.isdir(versions):
+        candidates += [
+            os.path.join(versions, d, "bin")
+            for d in sorted(os.listdir(versions), reverse=True)
+        ]
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    for c in candidates:
+        if os.path.isdir(c) and c not in parts:
+            os.environ["PATH"] = c + os.pathsep + os.environ.get("PATH", "")
+            log.info("added node bin to PATH for MCP servers: %s", c)
+            return
+
+
 async def main() -> None:
+    # node/npx must be on PATH so the SDK can launch stdio MCP servers
+    # (chrome-devtools etc.) — supervisord's restricted PATH lacks nvm's bin.
+    _ensure_node_on_path()
     # Install the git credential helper + gh shim BEFORE waiting on Slack config.
     # Git auth must not depend on Slack: the helper only needs Central's token-pull
     # config (provisioned before the gate keys), so the codespace's git — terminal
