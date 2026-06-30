@@ -108,6 +108,14 @@ function readBridgeEnv(key: string): string | undefined {
  * the agent-ready route sits next to the token route. Best-effort + no-op when
  * those aren't present (e.g. local dev) — the dashboard just flips on a later run.
  */
+/** Claude Code's persisted OAuth credentials (present once logged in). */
+const CLAUDE_CREDENTIALS = path.join(os.homedir(), ".claude", ".credentials.json");
+
+/** Whether the agent is authenticated (OAuth creds on disk or an API key set). */
+export function agentAuthed(): boolean {
+  return existsSync(CLAUDE_CREDENTIALS) || Boolean(process.env.ANTHROPIC_API_KEY);
+}
+
 export async function reportAgentReady(): Promise<boolean> {
   const tokenUrl = readBridgeEnv("CENTRAL_TOKEN_URL");
   const secret = readBridgeEnv("CENTRAL_PULL_SECRET");

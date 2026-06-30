@@ -2,7 +2,7 @@
 import * as p from "@clack/prompts";
 import { inspect } from "node:util";
 import { ask } from "./prompt.js";
-import { inDesktop, hydrateApiKey } from "./env.js";
+import { inDesktop, hydrateApiKey, agentAuthed, reportAgentReady } from "./env.js";
 import { ensureClaudeDefaultMode } from "./claude-config.js";
 import { ensureDesktop } from "./preflight.js";
 import { loadState, markComplete, saveState } from "./state.js";
@@ -24,6 +24,12 @@ async function main() {
   // non-interactive and skips ~/.bashrc, so a resumed run would otherwise look
   // unauthenticated and spawn an unauthenticated claude.
   hydrateApiKey();
+
+  // If the agent is already authenticated (creds or API key present), make sure
+  // Central knows on every launch — this clears the dashboard's "Set up in VS
+  // Code" prompt even when the wizard auto-exits below as already-complete (so
+  // teammates set up before this flag existed get reconciled on next open).
+  if (agentAuthed()) void reportAgentReady();
 
   // Default Claude Code to auto permission mode in this codespace so a plain
   // `claude` run isn't blocked on tool approvals (the bridge and the wizard's
