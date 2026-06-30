@@ -2,7 +2,7 @@ import * as p from "@clack/prompts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { claude } from "../env.js";
+import { claude, reportAgentReady } from "../env.js";
 import { upsertBridgeEnv, restartBridge } from "../bridge-ctl.js";
 import { ask } from "../prompt.js";
 import type { Step } from "../types.js";
@@ -73,7 +73,15 @@ export const authenticateAgent: Step = {
       }),
     );
 
-    if (method === "skip") return { skipped: true };
+    if (method === "skip") {
+      // If the agent is already authenticated (e.g. an API key persisted in the
+      // bridge .env survived), still tell Central so the dashboard clears the
+      // "Set up in VS Code" prompt.
+      if (existsSync(CREDENTIALS) || process.env.ANTHROPIC_API_KEY) {
+        await reportAgentReady();
+      }
+      return { skipped: true };
+    }
 
     if (method === "apikey") {
       const key = await ask(
@@ -99,6 +107,7 @@ export const authenticateAgent: Step = {
           : "API key set for this session only (couldn't persist to disk).",
       );
       if (wroteEnv) await restartBridge();
+      await reportAgentReady(); // agent is usable now — clear the dashboard prompt
       return;
     }
 
@@ -138,6 +147,7 @@ export const authenticateAgent: Step = {
       );
     }
     p.log.success("Claude Code is authenticated.");
+    await reportAgentReady(); // agent is usable now — clear the dashboard prompt
     // Bounce the bridge so existing sessions re-spawn claude with the new login.
     await restartBridge();
   },

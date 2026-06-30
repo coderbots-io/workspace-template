@@ -102,6 +102,29 @@ function readBridgeEnv(key: string): string | undefined {
 }
 
 /**
+ * Tell Central the agent is authenticated and the teammate is usable, so the
+ * dashboard drops its "Set up in VS Code" prompt. Endpoint + bearer come from
+ * the bridge .env Central provisioned (CENTRAL_TOKEN_URL / CENTRAL_PULL_SECRET);
+ * the agent-ready route sits next to the token route. Best-effort + no-op when
+ * those aren't present (e.g. local dev) — the dashboard just flips on a later run.
+ */
+export async function reportAgentReady(): Promise<boolean> {
+  const tokenUrl = readBridgeEnv("CENTRAL_TOKEN_URL");
+  const secret = readBridgeEnv("CENTRAL_PULL_SECRET");
+  if (!tokenUrl || !secret) return false;
+  const url = tokenUrl.replace("/github-token", "/agent-ready");
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${secret}` },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Load the Anthropic API key the auth step persisted into the bridge .env back
  * into this process's env, if it isn't already set. The wizard is launched by
  * the VS Code task's NON-interactive bash, which doesn't source ~/.bashrc — so
