@@ -156,6 +156,10 @@ class SlackRenderer:
         self._last_flushed_len = 0
         self._last_flush_at = 0.0
         self._placeholder = f"_{random.choice(THINKING_PHRASES)}_"
+        # Latest tool activity ("📄 Read foo.py"), shown while the agent is
+        # working so a long tool run isn't dead air. Cleared when real assistant
+        # text resumes, so the final message is just the answer.
+        self._status = ""
 
     async def open(self) -> None:
         resp = await self._client.chat_postMessage(
@@ -163,28 +167,50 @@ class SlackRenderer:
         )
         self._ts = resp["ts"]
 
+    def _render(self) -> str:
+        """The message body plus, if the agent is mid-tool, a status footer.
+        With no body yet, the status (or the thinking placeholder) IS the message."""
+        body = self._body.strip()
+        if self._status:
+            return f"{body}\n\n_{self._status}_" if body else f"_{self._status}_"
+        return body or self._placeholder
+
     async def append(self, text: str) -> None:
         if not text:
             return
+        # Real output supersedes the tool-activity line.
+        self._status = ""
         if len(self._body) + len(text) > MAX_MSG_CHARS:
             await self.flush(force=True)
             await self._roll_over()
         self._body += text
         await self.flush()
 
+    async def status(self, label: str) -> None:
+        """Reflect the current tool call in the message (edits in place). Keeps
+        the user informed during long tool runs without spamming new messages."""
+        if not label or label == self._status:
+            return
+        self._status = label
+        # Force past the body-delta throttle, but still respect the min interval
+        # so a burst of quick tools can't hammer chat.update.
+        await self._push(force_status=True)
+
     async def flush(self, force: bool = False) -> None:
+        await self._push(force=force)
+
+    async def _push(self, force: bool = False, force_status: bool = False) -> None:
         if self._ts is None:
             return
         now = time.monotonic()
         if not force:
-            if len(self._body) - self._last_flushed_len < 120:
+            if not force_status and len(self._body) - self._last_flushed_len < 120:
                 return
             if now - self._last_flush_at < MIN_UPDATE_INTERVAL_S:
                 return
-        rendered = self._body.strip() or self._placeholder
         try:
             await self._client.chat_update(
-                channel=self._channel, ts=self._ts, text=rendered
+                channel=self._channel, ts=self._ts, text=self._render()
             )
             self._last_flushed_len = len(self._body)
             self._last_flush_at = now
@@ -362,6 +388,10 @@ async def _handle_user_message_inner(
                 full_text.append(chunk.text)
                 # Strip ATTACH: lines from what's shown; we upload them below.
                 await renderer.append(_ATTACH_RE.sub("", chunk.text))
+            elif chunk.kind == "tool_use":
+                # Show the current tool in the existing message so a long tool
+                # run isn't dead air (e.g. "📄 Read config.ts", "📸 screenshot").
+                await renderer.status(_tool_label(chunk.name, chunk.args))
         await renderer.flush(force=True)
     except Exception as e:  # noqa: BLE001 — surface any turn failure to Slack
         log.exception("session error on %s", thread_key)
@@ -376,6 +406,37 @@ async def _handle_user_message_inner(
 
 # A line like `ATTACH: /abs/path/to/file` flags a file to upload to the thread.
 _ATTACH_RE = re.compile(r"^[ \t]*ATTACH:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+
+
+def _clip(s: str, n: int = 80) -> str:
+    s = " ".join((s or "").split())  # collapse whitespace/newlines
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _tool_label(name: Optional[str], args: Optional[dict]) -> str:
+    """A short, human-friendly status line for a tool call — shown in the Slack
+    message while the tool runs. Prefers the agent's own `description`, then a
+    tool-specific detail, else just the tool name. Deliberately avoids dumping
+    full command args into Slack."""
+    name = name or "tool"
+    a = args or {}
+    desc = a.get("description")
+    if isinstance(desc, str) and desc.strip():
+        return f"🔧 {_clip(desc)}"
+    if name == "Bash":
+        return f"💻 {_clip(str(a.get('command', '')))}"
+    if name in ("Read", "Edit", "MultiEdit", "Write", "NotebookEdit"):
+        path = a.get("file_path") or a.get("notebook_path") or ""
+        return f"📄 {name} {_clip(os.path.basename(str(path)) or str(path))}"
+    if name == "WebFetch":
+        return f"🌐 fetching {_clip(str(a.get('url', '')))}"
+    if name in ("Grep", "Glob"):
+        return f"🔎 {name} {_clip(str(a.get('pattern') or a.get('query') or ''))}"
+    if name == "Task":
+        return f"🤖 {_clip(str(a.get('description') or 'subagent'))}"
+    if name == "WebSearch":
+        return f"🔎 searching {_clip(str(a.get('query', '')))}"
+    return f"🔧 {name}"
 
 
 async def upload_files(
