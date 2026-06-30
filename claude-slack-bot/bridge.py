@@ -72,11 +72,41 @@ line itself is removed from your message, so write a normal sentence too."""
 MAX_MSG_CHARS = 2800
 MIN_UPDATE_INTERVAL_S = 1.0
 THINKING_PHRASES = (
-    "thinking…",
-    "reticulating splines…",
-    "consulting the oracle…",
-    "warming up the GPUs…",
-    "rummaging through tabs…",
+    "cogitatating...",
+    "ruminapping...",
+    "ponderizing...",
+    "syllogisifying...",
+    "deliberatening...",
+    "hypothesnoozing...",
+    "extrapolatering...",
+    "percologitating...",
+    "conflabulating...",
+    "noodlebrating...",
+    "ratiocinapping...",
+    "mullingate...",
+    "brainstorbling...",
+    "contemplifying...",
+    "discombobuthinking...",
+    "inferenciating...",
+    "postulatering...",
+    "sussurrogating...",
+    "metacognizzling...",
+    "philosophizzling...",
+    "wisdomizing...",
+    "braincrunchify...",
+    "epiphanizing...",
+    "hunchulating...",
+    "deducticating...",
+    "proboscinating...",
+    "intellectuabbling...",
+    "musefulating...",
+    "cerebrolating...",
+    "formulapping...",
+    "schemerizing...",
+    "reckonifying...",
+    "surmisening...",
+    "apprehendling...",
+    "calculatating...",
 )
 
 
@@ -523,6 +553,18 @@ def install_token_plumbing() -> None:
         subprocess.run(["git", "config", "--global", "--add", gh_scope_key, f"!{cred_helper}"], check=True)
     except Exception as e:  # noqa: BLE001
         log.warning("could not set github.com credential helper: %s", e)
+    # Bot tokens are per-installation (one per repo owner), so the helper needs to
+    # know which repo each git op targets. useHttpPath makes git pass the
+    # "<owner>/<repo>" path on the credential request, which coderbots-token uses
+    # to mint/cache the right owner's token. Without it git sends only the host
+    # and every repo would share the user's token (no access to org repos).
+    try:
+        subprocess.run(
+            ["git", "config", "--global", "credential.useHttpPath", "true"],
+            check=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not set credential.useHttpPath: %s", e)
     # Prepend the shim dir so the agent's `gh` resolves to our wrapper.
     os.environ["PATH"] = helper_dir + os.pathsep + os.environ.get("PATH", "")
     log.info("installed token plumbing (git helper + gh shim); real gh=%s", real_gh or "<none>")

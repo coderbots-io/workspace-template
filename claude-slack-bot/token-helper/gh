@@ -6,6 +6,10 @@
 # just-refreshed token from coderbots-token, then exec's the real gh. gh's own
 # git operations still flow through the git credential helper; this covers gh's
 # REST calls (pr create, api, issue comment).
+#
+# A bot token only covers ONE installation, so we tell coderbots-token which repo
+# owner this gh call targets: an explicit -R/--repo OWNER/REPO if present, else
+# the origin remote of the current repo. coderbots-token mints/caches per owner.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -35,7 +39,38 @@ if [ -z "$real_gh" ] || [ ! -x "$real_gh" ]; then
   exit 127
 fi
 
-tok="$("$token_bin" 2>/dev/null || true)"
+# Figure out the target owner/repo so the token is scoped to the right install.
+owner=""; repo=""
+nwo=""
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    -R|--repo) nwo="$a"; break ;;
+  esac
+  case "$a" in
+    -R=*|--repo=*) nwo="${a#*=}"; break ;;
+  esac
+  prev="$a"
+done
+# Fall back to the current repo's origin remote (e.g. github.com/OWNER/REPO).
+if [ -z "$nwo" ]; then
+  url="$(git config --get remote.origin.url 2>/dev/null || true)"
+  case "$url" in
+    *github.com[:/]*)
+      nwo="${url#*github.com}"; nwo="${nwo#[:/]}"; nwo="${nwo%.git}" ;;
+  esac
+fi
+if [ -n "$nwo" ]; then
+  owner="${nwo%%/*}"
+  rest="${nwo#*/}"; repo="${rest%%/*}"
+fi
+
+args=()
+[ -n "$owner" ] && args+=(--owner "$owner")
+[ -n "$repo" ] && args+=(--repo "$repo")
+
+# ${args[@]+...} guards an empty array under `set -u` (older bash).
+tok="$("$token_bin" ${args[@]+"${args[@]}"} 2>/dev/null || true)"
 [ -n "$tok" ] && export GH_TOKEN="$tok"
 
 exec "$real_gh" "$@"

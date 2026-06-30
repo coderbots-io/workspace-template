@@ -8,20 +8,30 @@ coalesces concurrent refreshes behind a file lock. On any pull failure it falls
 back to the cached token (and, last resort, the boot token in ~/.git-credentials)
 rather than failing — a maybe-stale token beats none.
 
+An installation token only covers ONE installation (one account's repos), so the
+token for `acme/widgets` differs from the one for your personal repos. Callers
+pass the repo owner (--owner, optionally --repo); we keep a SEPARATE cache per
+owner and ask Central to mint for that owner's installation. With no owner we use
+the default cache, which the bridge seeds over Ably with the user's own token —
+the instant first-op token and the fallback for owner-less ops (e.g. plain `gh`).
+
 Config (written by bridge.py at startup, from the provisioned bridge .env):
   ~/.config/coderbots/pull.env   CENTRAL_TOKEN_URL, CENTRAL_PULL_SECRET, REAL_GH
-Cache:
-  ~/.cache/coderbots/gh-token        the token
-  ~/.cache/coderbots/gh-token.exp    expiry, epoch seconds
-  ~/.cache/coderbots/gh-token.lock   flock for refresh coalescing
+Cache (per owner; the default/no-owner cache keeps the legacy names):
+  ~/.cache/coderbots/gh-token[__<owner>]        the token
+  ~/.cache/coderbots/gh-token[__<owner>].exp    expiry, epoch seconds
+  ~/.cache/coderbots/gh-token[__<owner>].lock   flock for refresh coalescing
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -31,9 +41,17 @@ HTTP_TIMEOUT = 10
 HOME = os.path.expanduser("~")
 CONFIG = os.environ.get("CODERBOTS_PULL_ENV", os.path.join(HOME, ".config/coderbots/pull.env"))
 CACHE_DIR = os.path.join(HOME, ".cache/coderbots")
-TOK = os.path.join(CACHE_DIR, "gh-token")
-EXP = os.path.join(CACHE_DIR, "gh-token.exp")
-LOCK = os.path.join(CACHE_DIR, "gh-token.lock")
+
+
+def _cache_paths(owner: str | None) -> tuple[str, str, str]:
+    """(token, expiry, lock) paths. Owner-less ops use the legacy names so the
+    bridge's Ably-seeded cache keeps working; per-owner ops get their own files."""
+    base = os.path.join(CACHE_DIR, "gh-token")
+    if owner:
+        # GitHub logins are case-insensitive; normalize + sanitize for a filename.
+        safe = re.sub(r"[^a-z0-9._-]", "_", owner.lower())
+        base = f"{base}__{safe}"
+    return base, f"{base}.exp", f"{base}.lock"
 
 
 def _read_config() -> dict[str, str]:
@@ -51,22 +69,22 @@ def _read_config() -> dict[str, str]:
     return cfg
 
 
-def _read_cache() -> tuple[str | None, float]:
+def _read_cache(tok_path: str, exp_path: str) -> tuple[str | None, float]:
     try:
-        with open(TOK) as f:
+        with open(tok_path) as f:
             tok = f.read().strip()
-        with open(EXP) as f:
+        with open(exp_path) as f:
             exp = float(f.read().strip())
         return (tok or None), exp
     except (FileNotFoundError, ValueError):
         return None, 0.0
 
 
-def _write_cache(tok: str, exp_epoch: float) -> None:
+def _write_cache(tok_path: str, exp_path: str, tok: str, exp_epoch: float) -> None:
     os.makedirs(CACHE_DIR, exist_ok=True)
     old = os.umask(0o077)
     try:
-        for path, val in ((TOK, tok), (EXP, str(int(exp_epoch)))):
+        for path, val in ((tok_path, tok), (exp_path, str(int(exp_epoch)))):
             tmp = f"{path}.tmp"
             with open(tmp, "w") as f:
                 f.write(val)
@@ -94,11 +112,21 @@ def _boot_token() -> str | None:
     return None
 
 
-def _pull(cfg: dict[str, str]) -> bool:
+def _pull(
+    cfg: dict[str, str],
+    tok_path: str,
+    exp_path: str,
+    owner: str | None,
+    repo: str | None,
+) -> bool:
     url = cfg.get("CENTRAL_TOKEN_URL")
     secret = cfg.get("CENTRAL_PULL_SECRET")
     if not url or not secret:
         return False
+    # Tell Central which installation to mint for (owner-scoped tokens).
+    q = {k: v for k, v in (("owner", owner), ("repo", repo)) if v}
+    if q:
+        url = f"{url}{'&' if '?' in url else '?'}{urllib.parse.urlencode(q)}"
     req = urllib.request.Request(
         url, method="POST", headers={"Authorization": f"Bearer {secret}"}
     )
@@ -108,30 +136,49 @@ def _pull(cfg: dict[str, str]) -> bool:
         tok = data.get("token")
         exp = data.get("expires_at")
         if tok and exp:
-            _write_cache(tok, _iso_to_epoch(exp))
+            _write_cache(tok_path, exp_path, tok, _iso_to_epoch(exp))
             return True
     except (urllib.error.URLError, ValueError, OSError):
         pass
     return False
 
 
-def main() -> int:
-    tok, exp = _read_cache()
+def _resolve(owner: str | None, repo: str | None) -> str | None:
+    tok_path, exp_path, lock_path = _cache_paths(owner)
+
+    tok, exp = _read_cache(tok_path, exp_path)
     if tok and time.time() < exp - SKEW:
-        sys.stdout.write(tok)
-        return 0
+        return tok
 
     # Stale or missing — refresh under a lock so concurrent git/gh calls coalesce.
     os.makedirs(CACHE_DIR, exist_ok=True)
     import fcntl
 
-    with open(LOCK, "w") as lock:
+    with open(lock_path, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        tok, exp = _read_cache()  # someone may have refreshed while we waited
+        tok, exp = _read_cache(tok_path, exp_path)  # someone may have refreshed
         if not (tok and time.time() < exp - SKEW):
-            _pull(_read_config())
-            tok, exp = _read_cache()
+            _pull(_read_config(), tok_path, exp_path, owner, repo)
+            tok, exp = _read_cache(tok_path, exp_path)
 
+    return tok
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--owner", default=None)
+    ap.add_argument("--repo", default=None)
+    args, _ = ap.parse_known_args()
+    owner = args.owner or None
+    repo = args.repo or None
+
+    tok = _resolve(owner, repo)
+
+    # An owner-scoped mint can fail (App not installed on that org, network blip).
+    # Fall back to the default/user cache, then the boot token — a token that may
+    # lack access beats emitting none (which would make git prompt / hard-fail).
+    if not tok and owner:
+        tok = _resolve(None, None)
     if not tok:
         tok = _boot_token()
     if not tok:
