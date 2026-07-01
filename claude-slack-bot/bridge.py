@@ -71,6 +71,12 @@ line itself is removed from your message, so write a normal sentence too."""
 
 MAX_MSG_CHARS = 2800
 MIN_UPDATE_INTERVAL_S = 1.0
+
+# Delimiters for the coderbots-managed block inside ~/.claude/CLAUDE.md (see
+# _ensure_home_claude_md). Anything outside them — added by the user or by the
+# agent itself — survives every refresh.
+_CLAUDE_MD_START = "<!-- coderbots:managed:start (regenerated on every bridge start, do not edit by hand) -->"
+_CLAUDE_MD_END = "<!-- coderbots:managed:end -->"
 THINKING_PHRASES = (
     "cogitatating...",
     "ruminapping...",
@@ -920,7 +926,60 @@ def _ensure_node_on_path() -> None:
             return
 
 
+def _ensure_home_claude_md() -> None:
+    """Install/refresh the coderbots-managed block of the agent's global
+    CLAUDE.md (~/.claude/CLAUDE.md, loaded by Claude Code regardless of cwd) so
+    every session knows it's running in a codespace, where to check out repos,
+    and to keep a work log it can refer back to across turns/threads. The
+    template lives at templates/HOME_CLAUDE.md, inside claude-slack-bot/ — the
+    directory Central already re-fetches from workspace-template on every
+    provision/wake — so template edits reach already-provisioned codespaces on
+    their next restart without touching the per-account repo or requiring a
+    rebuild.
+
+    Only the marked block is replaced; anything a user or the agent has added
+    outside it (or below it, on first write) is left alone.
+    """
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "HOME_CLAUDE.md")
+    try:
+        with open(template_path, "r", encoding="utf-8") as f:
+            block = f.read().strip()
+    except OSError:
+        return
+    managed = f"{_CLAUDE_MD_START}\n{block}\n{_CLAUDE_MD_END}\n"
+
+    target = os.path.join(os.path.expanduser("~"), ".claude", "CLAUDE.md")
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            existing = f.read()
+    except FileNotFoundError:
+        existing = ""
+
+    if _CLAUDE_MD_START in existing and _CLAUDE_MD_END in existing:
+        pre, _, rest = existing.partition(_CLAUDE_MD_START)
+        _, _, post = rest.partition(_CLAUDE_MD_END)
+        # `managed` already supplies the newline right after END; drop the
+        # leading newline(s) captured in `post` so re-running with no changes
+        # is a true no-op instead of growing a blank line each time.
+        post = post.lstrip("\n")
+        new_content = pre + managed + ("\n" + post if post else "")
+    else:
+        # First run, or a hand-written file with no managed block yet: put the
+        # managed block on top, keep whatever was already there below it.
+        new_content = managed + ("\n" + existing if existing.strip() else "")
+
+    if new_content == existing:
+        return
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(new_content)
+    log.info("refreshed coderbots-managed block in %s", target)
+
+
 async def main() -> None:
+    # Make sure the agent's global CLAUDE.md has our environment/work-log
+    # guidance before any session can start.
+    _ensure_home_claude_md()
     # node/npx must be on PATH so the SDK can launch stdio MCP servers
     # (chrome-devtools etc.) — supervisord's restricted PATH lacks nvm's bin.
     _ensure_node_on_path()
