@@ -489,6 +489,64 @@ async def handle_session_clear(payload: dict[str, Any], sessions: SessionManager
     log.info("session.clear thread=%s cleared=%s", thread_key, cleared)
 
 
+def _github_task_prompt(kind: str, repo: str, number: int, url: str, title: str, label: str) -> str:
+    """The agent prompt for a GitHub-label-triggered task. Both skills default to
+    the current directory's `origin` repo, but this codespace is checked out on
+    the workspace repo — so we tell the agent to work in `repo`, cloning it under
+    ~/projects/ first if needed, then run the skill there. Results are posted back
+    to GitHub by the skill itself (a PR comment / a fix PR), so there's no Slack."""
+    setup = (
+        f"If you don't already have {repo} checked out locally, clone it under "
+        f"~/projects/ first, then run the skill from inside that checkout so it "
+        f"targets the right repository (not this workspace repo)."
+    )
+    if kind == "pr":
+        return (
+            f"You've been assigned a GitHub pull request to review — the `{label}` "
+            f"label was added to it. Please use the review-pr skill (/review-pr) to "
+            f"visually verify PR #{number} in {repo} and post your verdict back on "
+            f"the PR.\n\n- PR: {url}\n- Title: {title}\n\n{setup}"
+        )
+    return (
+        f"You've been assigned a GitHub issue to fix — the `{label}` label was "
+        f"added to it. Please /fix-github-issues on {repo} {number}.\n\n"
+        f"- Issue: {url}\n- Title: {title}\n\n{setup}"
+    )
+
+
+async def handle_github_task(payload: dict[str, Any], sessions: SessionManager) -> None:
+    """A PR/Issue was labeled with a teammate's name (dispatched by Central's
+    /api/github/webhook). Run the matching skill; the skill reports back on
+    GitHub, so unlike user.message there's no Slack sink — we just drive the turn
+    to completion and log it."""
+    kind = payload.get("kind")
+    repo = payload.get("repo")
+    number = payload.get("number")
+    url = payload.get("url") or ""
+    title = payload.get("title") or ""
+    label = payload.get("label") or ""
+    if kind not in ("pr", "issue") or not repo or not isinstance(number, int):
+        log.warning("skipping github.task with missing/invalid fields: %s", payload)
+        return
+
+    # A stable per-item key so re-labeling the same PR/Issue resumes its thread
+    # rather than starting from scratch.
+    thread_key = f"github:{kind}:{repo}#{number}"
+    prompt = _github_task_prompt(kind, repo, number, url, title, label)
+    log.info("github.task kind=%s repo=%s number=%s label=%s", kind, repo, number, label)
+
+    _begin_turn()
+    try:
+        session = await sessions.get_or_create(thread_key)
+        async for chunk in session.send(prompt):
+            if chunk.kind == "result":
+                log.info("github.task %s %s#%s finished: %s", kind, repo, number, chunk.text)
+    except Exception:  # noqa: BLE001 — a failed task must not kill the consumer
+        log.exception("github.task error repo=%s number=%s", repo, number)
+    finally:
+        _end_turn()
+
+
 async def handle_clear_command(
     payload: dict[str, Any], sessions: SessionManager, slack: AsyncWebClient
 ) -> None:
@@ -799,6 +857,8 @@ async def dispatch(
         await handle_session_clear(payload, sessions)
     elif name == "github.token":
         handle_github_token(payload)
+    elif name == "github.task":
+        await handle_github_task(payload, sessions)
     else:
         log.debug("ignoring message name=%s", name)
 
