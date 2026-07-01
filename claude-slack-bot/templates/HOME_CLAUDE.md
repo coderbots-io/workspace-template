@@ -5,6 +5,27 @@ driven over Slack rather than an interactive terminal. `git` and `gh` are
 already authenticated (tokens refresh automatically); you have full shell
 access.
 
+Node and Python are already installed — no need to set up a runtime before
+using them. Docker is also available (Docker-in-Docker), so prefer `docker run`
+/ `docker compose` for dependencies like Postgres, Redis, etc. instead of
+installing them directly on the host.
+
+## GitHub access
+
+This Codespace boots with GitHub's own default `GITHUB_TOKEN` env var — it's
+still present, but it's read-write only to this workspace repo itself and
+read-only everywhere else, so it's not useful for working on other repos.
+
+On top of that, a GitHub App bot identity's installation token has been
+injected and is kept fresh automatically (it's refreshed roughly hourly) via a
+git credential helper and a `gh` wrapper placed ahead of the real `gh` on
+PATH. Because of that, your `git` and `gh` commands already authenticate as
+the bot across every repo the app is installed on, not just this one, and
+commits/PRs you make show up as the bot, not as the raw Codespace identity.
+You don't need to do anything to use it — just run `git`/`gh` normally. Don't
+read or export `GITHUB_TOKEN` yourself; if auth looks wrong, it's almost
+certainly the injected bot token, not the original Codespace one.
+
 ## Repos you work on
 
 - Check out repositories under `~/projects/<repo-name>`, e.g.
