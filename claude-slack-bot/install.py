@@ -119,7 +119,7 @@ def upsert_env(path: str, key: str, value: str) -> None:
 
 def build_manifest(name: str, redirect_uri: str) -> dict:
     """The Slack app manifest for one coder bot — paste into the app's App
-    Manifest editor to set scopes, events, /clear, Socket Mode, and the OAuth
+    Manifest editor to set scopes, events, Socket Mode, and the OAuth
     redirect URL in one shot. Not used by the install flow itself."""
     return {
         "display_information": {
@@ -131,13 +131,6 @@ def build_manifest(name: str, redirect_uri: str) -> dict:
                 "display_name": name,
                 "always_online": True,
             },
-            "slash_commands": [
-                {
-                    "command": "/clear",
-                    "description": "Reset Claude session in this thread/DM.",
-                    "should_escape": False,
-                }
-            ],
         },
         "oauth_config": {
             "redirect_urls": [redirect_uri],

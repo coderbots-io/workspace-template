@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 from ably import AblyRealtime
@@ -489,6 +489,81 @@ async def handle_session_clear(payload: dict[str, Any], sessions: SessionManager
     log.info("session.clear thread=%s cleared=%s", thread_key, cleared)
 
 
+async def handle_clear_command(
+    payload: dict[str, Any], sessions: SessionManager, slack: AsyncWebClient
+) -> None:
+    """`!clear` — drop this thread's session so the next message starts fresh.
+    The text-command equivalent of the `/clear` slash command, handled by the
+    bridge directly instead of routed through Central."""
+    channel = payload.get("channel")
+    reply_ts = payload.get("reply_thread_ts")
+    thread_key = payload.get("thread_key")
+    if not thread_key or not channel:
+        log.warning("skipping !clear missing thread_key/channel: %s", payload)
+        return
+    cleared = await sessions.drop(thread_key)
+    log.info("!clear thread=%s cleared=%s", thread_key, cleared)
+    try:
+        await slack.chat_postMessage(
+            channel=channel,
+            thread_ts=reply_ts,
+            text=(
+                ":wastebasket: session cleared — the next message starts fresh."
+                if cleared
+                else "_No active session to clear._"
+            ),
+        )
+    except SlackApiError:
+        log.exception("chat_postMessage (!clear ack) failed")
+
+
+async def handle_stop_command(
+    payload: dict[str, Any], sessions: SessionManager, slack: AsyncWebClient
+) -> None:
+    thread_key = payload.get("thread_key")
+    channel = payload.get("channel")
+    reply_ts = payload.get("reply_thread_ts")
+    if not thread_key or not channel:
+        log.warning("skipping !stop missing thread_key/channel: %s", payload)
+        return
+    session = sessions.get(thread_key)
+    stopped = await session.interrupt() if session else False
+    log.info("!stop thread=%s stopped=%s", thread_key, stopped)
+    try:
+        await slack.chat_postMessage(
+            channel=channel,
+            thread_ts=reply_ts,
+            text=":octagonal_sign: stopped." if stopped else "_Nothing running._",
+        )
+    except SlackApiError:
+        log.exception("chat_postMessage (!stop ack) failed")
+
+
+async def handle_help_command(
+    payload: dict[str, Any], sessions: SessionManager, slack: AsyncWebClient
+) -> None:
+    channel = payload.get("channel")
+    reply_ts = payload.get("reply_thread_ts")
+    if not channel:
+        return
+    lines = "\n".join(f"• `{cmd}` — {desc}" for cmd, (_, desc) in _META_COMMANDS.items())
+    text = f":question: *Commands*\n{lines}"
+    try:
+        await slack.chat_postMessage(channel=channel, thread_ts=reply_ts, text=text)
+    except SlackApiError:
+        log.exception("chat_postMessage (!help ack) failed")
+
+
+# Text-only "meta commands" recognized before a message is forwarded to the
+# agent as a prompt — an exact (stripped, lowercased) match on the whole
+# message routes to the handler instead. Order is display order for !help.
+_META_COMMANDS: dict[str, tuple[Callable[..., Awaitable[None]], str]] = {
+    "!stop": (handle_stop_command, "interrupt the turn currently running"),
+    "!clear": (handle_clear_command, "reset this thread's session"),
+    "!help": (handle_help_command, "show this list"),
+}
+
+
 def _bridge_env_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
@@ -714,7 +789,12 @@ async def dispatch(
             log.warning("unparseable payload for name=%s", name)
             return
     if name == "user.message":
-        await handle_user_message(payload, sessions, slack)
+        text = payload.get("text") or payload.get("content") or ""
+        meta = _META_COMMANDS.get(text.strip().lower())
+        if meta:
+            await meta[0](payload, sessions, slack)
+        else:
+            await handle_user_message(payload, sessions, slack)
     elif name == "session.clear":
         await handle_session_clear(payload, sessions)
     elif name == "github.token":
@@ -990,8 +1070,15 @@ async def main() -> None:
     # connected. Previously this ran only after wait_for_config() (which blocks on
     # SLACK_BOT_TOKEN), so until Slack was connected git fell back to the read-only
     # Codespaces token -> "Write access to repository not granted" (403) on push.
-    await _wait_for_token_pull_config()
-    install_token_plumbing()
+    # Local-dev escape hatch: LOCAL_DEV=1 skips Central's token-pull wait (a 5-min
+    # poll when the vars are absent) AND the git credential-helper install, which
+    # would repoint the host's global `git config credential.helper`. When running
+    # the bridge on a laptop you already have your own git/gh auth, so leave it be.
+    if os.getenv("LOCAL_DEV") == "1":
+        log.info("LOCAL_DEV=1: skipping token-pull wait and git plumbing")
+    else:
+        await _wait_for_token_pull_config()
+        install_token_plumbing()
 
     ably_key, slack_token = await wait_for_config()
     channel_name = resolve_channel()

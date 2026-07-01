@@ -17,10 +17,6 @@ features:
   bot_user:
     display_name: MyCoder
     always_online: true
-  slash_commands:
-    - command: /clear
-      description: Reset Claude session in this thread/DM.
-      should_escape: false
 
 oauth_config:
   redirect_urls:

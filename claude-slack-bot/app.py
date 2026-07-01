@@ -11,11 +11,8 @@ Slack app setup (Socket Mode):
        im:history, im:read, im:write, mpim:history, users:read, commands.
   5. Event Subscriptions -> Enable Events. Subscribe to bot events:
        app_mention, message.channels, message.groups, message.im, message.mpim.
-  6. Slash Commands -> Create New Command:
-       Command: /clear   Description: Reset Claude session in this thread/DM.
-       (Request URL is unused with Socket Mode; put any placeholder.)
-  7. Install to workspace. -> SLACK_BOT_TOKEN.
-  8. Invite the bot to the channel(s) you want it in.
+  6. Install to workspace. -> SLACK_BOT_TOKEN.
+  7. Invite the bot to the channel(s) you want it in.
 """
 
 from __future__ import annotations
@@ -519,42 +516,13 @@ async def handle_user_message(event: dict[str, Any], client) -> None:
     )
 
 
-@app.command("/clear")
-async def on_clear(ack, command, client):
-    await ack()
-
-    channel_id = command["channel_id"]
-    thread_ts = command.get("thread_ts")
-    user_id = command["user_id"]
-
-    if channel_id.startswith("D"):
-        skey = f"dm:{channel_id}"
-        reply_thread = None
-    elif thread_ts:
-        skey = f"thread:{thread_ts}"
-        reply_thread = thread_ts
-    else:
-        await client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text="Run `/clear` inside a thread with me, or in our DM.",
-        )
-        return
-
-    log.info("/clear invoked user=%s channel=%s session=%s", user_id, channel_id, skey)
-    cleared = await sessions.drop(skey)
-    log.info("/clear result session=%s cleared=%s", skey, cleared)
-    text = "🧹 Session cleared." if cleared else "_No active session here._"
-    await client.chat_postMessage(channel=channel_id, thread_ts=reply_thread, text=text)
-
-
 @app.event("app_mention")
 async def on_app_mention(event, client):
     await handle_user_message(event, client)
 
 
 # Threads we've confirmed the bot has posted in (cleared per process; survives
-# /clear and SessionManager state). Used to keep responding to follow-up
+# a session drop and SessionManager state). Used to keep responding to follow-up
 # replies after a session was dropped, without forcing the user to re-@.
 _bot_thread_keys: set[str] = set()
 
@@ -610,7 +578,7 @@ async def on_message(event, client):
             return  # app_mention handler will take it
         skey = session_key(event)
         if not sessions.exists(skey):
-            # Session may have been dropped by /clear or a process restart.
+            # Session may have been dropped by a clear command or a process restart.
             # Verify the bot has actually posted in this thread before
             # waking up — otherwise any thread reply in any channel would
             # trigger the bot.

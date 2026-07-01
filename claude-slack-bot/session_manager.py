@@ -288,6 +288,20 @@ class Session:
                 self._connected = False
                 self.log.info("closed")
 
+    async def interrupt(self) -> bool:
+        """Cancel the turn currently in flight, if any. Returns whether there
+        was one to cancel.
+
+        Deliberately does NOT take `_lock` — that's held by `send()` for the
+        whole turn, so waiting on it here would block until the turn finishes
+        on its own, defeating the point. `_client.interrupt()` is a control-
+        channel request independent of the stdout stream `send()` is reading,
+        so it's safe to fire from a concurrent task."""
+        if not self._connected or not self._lock.locked():
+            return False
+        await self._client.interrupt()
+        return True
+
 
 _MAX_TOOL_RESULT_CHARS = 32_000
 
@@ -406,6 +420,12 @@ class SessionManager:
 
     def exists(self, key: str) -> bool:
         return key in self._sessions
+
+    def get(self, key: str) -> Optional[Session]:
+        """Look up a thread's session without creating one, so callers that
+        only want to act on an existing turn (e.g. !stop) don't spin up a
+        fresh session just to find nothing running in it."""
+        return self._sessions.get(key)
 
     async def drop(self, key: str) -> bool:
         """Close and forget the session for `key`. Returns True if one existed.
