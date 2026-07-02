@@ -836,14 +836,22 @@ def _resolve_env_path(target: str) -> Optional[str]:
         return None
     p = os.path.abspath(os.path.expanduser(target))
     rp = os.path.realpath(p)
-    roots = [
-        os.path.realpath("/workspaces"),
-        os.path.realpath(os.path.expanduser("~")),
+    # Allow the workspace, the agent's home (repos live under ~/projects), and
+    # scratch/temp dirs. The point is to block system paths (/etc, /usr, ...), not
+    # to be a jail: the agent already has full shell access to these roots.
+    candidates = [
+        "/workspaces",
+        os.path.expanduser("~"),
+        "/tmp",
+        tempfile.gettempdir(),
+        os.environ.get("TMPDIR") or "",
     ]
+    roots = [os.path.realpath(r) for r in candidates if r]
     if not any(rp == root or rp.startswith(root + os.sep) for root in roots):
         return None
-    # An explicit .env (or an existing file) is used as-is; a directory gets /.env.
-    if os.path.basename(p) == ".env" or os.path.isfile(p):
+    # A path ending in .env (".env", "test.env", ...) or an existing file is used
+    # as-is; anything else is treated as a directory and gets /.env appended.
+    if os.path.basename(p).endswith(".env") or os.path.isfile(p):
         return p
     return os.path.join(p, ".env")
 
