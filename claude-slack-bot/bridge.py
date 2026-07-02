@@ -69,6 +69,19 @@ and put its absolute path on its own line prefixed with `ATTACH:`, e.g.:
 Emit one ATTACH line per file. The file is uploaded to this thread; the ATTACH
 line itself is removed from your message, so write a normal sentence too."""
 
+# Teaches the agent the secure path for getting app secrets into the workspace —
+# never through chat (which would leak them into Slack + your context).
+SECRETS_PROMPT = """\
+When an app you're setting up needs secret environment variables (API keys,
+tokens, database URLs, etc.), NEVER ask the user to paste the values into chat —
+that would leak them into Slack and your context. Instead run the
+`collect-user-secrets` CLI:
+  collect-user-secrets --target <repo-dir-or-.env-path> KEY1 KEY2 ...
+It prints a one-time URL. Give the user that URL and ask them to open it and enter
+the values; they are written straight into the target `.env` in this workspace —
+you will NOT see them. Ask the user to reply once they've submitted, then continue
+(re-run the app; the `.env` is now populated)."""
+
 MAX_MSG_CHARS = 2800
 MIN_UPDATE_INTERVAL_S = 1.0
 
@@ -155,7 +168,7 @@ def build_session_manager() -> SessionManager:
             os.getenv("CLAUDE_SETTING_SOURCES", "user,project,local")
         ),
         extra_args=extra_args,
-        system_prompt_append=SLACK_FORMATTING_PROMPT,
+        system_prompt_append=SLACK_FORMATTING_PROMPT + "\n\n" + SECRETS_PROMPT,
         mcp_servers=mcp_servers,
     )
 
@@ -645,6 +658,16 @@ def install_token_plumbing() -> None:
     gh_shim = os.path.join(helper_dir, "gh")
     scripts_present = all(os.path.exists(p) for p in (token_script, cred_helper, gh_shim))
 
+    # Best-effort: make the secrets-collection CLI executable + on PATH too. Not
+    # part of scripts_present so an old checkout without it still gets git/gh
+    # plumbing; it just won't have this tool.
+    secrets_tool = os.path.join(helper_dir, "collect-user-secrets")
+    if os.path.exists(secrets_tool):
+        try:
+            os.chmod(secrets_tool, 0o755)
+        except OSError:
+            pass
+
     # Resolve the REAL gh BEFORE the shim shadows it on PATH, so the shim can exec it.
     real_gh = shutil.which("gh") or ""
 
@@ -773,6 +796,86 @@ def handle_github_token(payload: dict[str, Any]) -> None:
     )
 
 
+def _env_encode(value: str) -> str:
+    """Render a value for a dotenv line. Plain tokens (keys, URLs) are written
+    raw; anything with spaces/quotes/newlines is double-quoted and escaped so the
+    .env stays parseable."""
+    if re.fullmatch(r"[A-Za-z0-9_./:@%+\-]*", value):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def _upsert_env_line(path: str, key: str, value: str) -> None:
+    """Replace/append KEY=value in an arbitrary .env file, preserving other lines.
+    Creates the parent dir and keeps the file 0600 (it holds secrets)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    try:
+        with open(path) as f:
+            lines = [ln for ln in f.read().splitlines() if not ln.startswith(f"{key}=")]
+    except FileNotFoundError:
+        lines = []
+    lines.append(f"{key}={_env_encode(value)}")
+    old = os.umask(0o077)
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    finally:
+        os.umask(old)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _resolve_env_path(target: str) -> Optional[str]:
+    """Resolve the requested target (a repo dir or an explicit .env path) to the
+    .env file to write. Confines writes to the codespace's own roots (/workspaces
+    or $HOME) so a bad/hostile target can't scribble outside the workspace."""
+    if not target:
+        return None
+    p = os.path.abspath(os.path.expanduser(target))
+    rp = os.path.realpath(p)
+    roots = [
+        os.path.realpath("/workspaces"),
+        os.path.realpath(os.path.expanduser("~")),
+    ]
+    if not any(rp == root or rp.startswith(root + os.sep) for root in roots):
+        return None
+    # An explicit .env (or an existing file) is used as-is; a directory gets /.env.
+    if os.path.basename(p) == ".env" or os.path.isfile(p):
+        return p
+    return os.path.join(p, ".env")
+
+
+def handle_secrets_set(payload: dict[str, Any]) -> None:
+    """Apply secrets the user entered on Central's /secrets/<token> form, pushed
+    here over Ably. We write them into the target .env WITHOUT surfacing the values
+    to the agent — only the key names are logged. This is the secure counterpart
+    to the agent's `collect-user-secrets` CLI: values reach the workspace without
+    ever passing through Slack or the model's context."""
+    values = (payload or {}).get("values")
+    target = (payload or {}).get("target")
+    if not isinstance(values, dict) or not values:
+        log.warning("secrets.set event missing values")
+        return
+    env_path = _resolve_env_path(target if isinstance(target, str) else "")
+    if not env_path:
+        log.warning("secrets.set rejected target path: %r", target)
+        return
+    written = []
+    for k, v in values.items():
+        if not isinstance(k, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            log.warning("secrets.set skipping invalid key: %r", k)
+            continue
+        if not isinstance(v, str):
+            continue
+        _upsert_env_line(env_path, k, v)
+        written.append(k)
+    # Key NAMES only — never the values.
+    log.info("secrets.set wrote %d key(s) %s to %s", len(written), written, env_path)
+
+
 async def dispatch(
     name: Optional[str],
     payload: Any,
@@ -799,6 +902,8 @@ async def dispatch(
         await handle_session_clear(payload, sessions)
     elif name == "github.token":
         handle_github_token(payload)
+    elif name == "secrets.set":
+        handle_secrets_set(payload)
     else:
         # github.task is deliberately gone: Central now surfaces GitHub-label tasks
         # through the Slack path (as a user.message) so they're never invisible.
