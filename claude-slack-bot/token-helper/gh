@@ -52,6 +52,32 @@ for a in "$@"; do
   esac
   prev="$a"
 done
+# No -R/--repo. Many gh subcommands name the target repo as a POSITIONAL, not a
+# flag — most importantly `gh repo clone|view|fork|sync|... OWNER/REPO` and
+# `gh api .../repos/OWNER/REPO`. Scope by that positional so an op against a repo
+# in a DIFFERENT org than this codespace's own repo mints the right installation's
+# token. Without this we drop to the origin remote below (the workspace repo's
+# owner) and 404 on every cross-org repo (e.g. cloning coderbots-io/central from a
+# supercog-ai codespace).
+if [ -z "$nwo" ]; then
+  case "${1:-}" in
+    repo)
+      # First OWNER/REPO-looking positional after `repo` (skip flags).
+      for a in "${@:2}"; do
+        [ "${a#-}" = "$a" ] || continue
+        if [[ "$a" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then nwo="$a"; break; fi
+      done
+      ;;
+    api)
+      # Pull OWNER/REPO out of a REST path like repos/OWNER/REPO[/...].
+      for a in "$@"; do
+        if [[ "$a" =~ (^|/)repos/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+) ]]; then
+          nwo="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"; break
+        fi
+      done
+      ;;
+  esac
+fi
 # Fall back to the current repo's origin remote (e.g. github.com/OWNER/REPO).
 if [ -z "$nwo" ]; then
   url="$(git config --get remote.origin.url 2>/dev/null || true)"
