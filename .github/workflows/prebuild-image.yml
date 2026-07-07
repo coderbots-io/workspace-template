@@ -1,0 +1,61 @@
+# Pre-builds the teammate workspace devcontainer image and publishes it to GHCR.
+#
+# Codespaces for every account boot from a per-account `coderbots-workspace` repo
+# generated from THIS template. Each cold create used to rebuild the heavy
+# Dockerfile (XFCE + Chrome + KasmVNC + apt) plus all devcontainer features from
+# scratch (~5–15 min). Instead, this workflow builds that image once and pushes
+# it to ghcr.io/coderbots-io/workspace-template:latest; the runtime
+# .devcontainer/devcontainer.json references it via "image", so creates only pull.
+#
+# One-time setup after the first successful run: make the GHCR package PUBLIC
+# (github.com/orgs/coderbots-io/packages -> workspace-template -> Package settings
+# -> Change visibility -> Public). Codespaces in customer orgs pull it anonymously
+# during create, so it must not be private.
+name: Prebuild workspace image
+
+on:
+  push:
+    branches: [main]
+    # Only rebuild when something that goes INTO the image changes.
+    paths:
+      - ".devcontainer/**"
+      - ".github/workflows/prebuild-image.yml"
+  workflow_dispatch: {}
+  schedule:
+    # Weekly rebuild so the image picks up base-image / Chrome / apt security
+    # updates even when .devcontainer/ is untouched. Mondays 07:00 UTC.
+    - cron: "0 7 * * 1"
+
+# Don't stack builds on the same ref — the newest push wins.
+concurrency:
+  group: prebuild-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Builds .devcontainer/Dockerfile, layers the features from
+      # build.devcontainer.json, embeds the devcontainer.metadata label, and
+      # pushes. cacheFrom the published tag keeps unchanged layers instant.
+      - name: Build and push devcontainer image
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/build.devcontainer.json
+          imageName: ghcr.io/coderbots-io/workspace-template
+          imageTag: latest
+          cacheFrom: ghcr.io/coderbots-io/workspace-template:latest
+          push: always
