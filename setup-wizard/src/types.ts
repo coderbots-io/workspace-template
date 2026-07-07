@@ -14,10 +14,11 @@ export interface WizardState {
   /** local checkout path for the selected repo */
   repoPath?: string;
   /** true once Claude Code has been run INTERACTIVELY at least once this setup
-   *  (browser login, or the smoke-test warm-up). Claude's one-time first-run
-   *  prompts — trust this folder, pick a theme, allow the Chrome extension —
-   *  only appear interactively; a headless `claude -p` can't answer them. Once
-   *  this is set, the first run is done and the headless smoke test runs clean. */
+   *  (the browser-login auth step, or the "finish first-run setup" step).
+   *  Claude's one-time first-run prompts — trust this folder, pick a theme,
+   *  allow the Chrome extension — only appear interactively; a headless
+   *  `claude -p` can't answer them. Once this is set, the first run is done so
+   *  the bot's later headless spawns start clean. */
   claudeInteractive?: boolean;
   /** last time the state was written (ISO); set by the saver */
   updatedAt?: string;
