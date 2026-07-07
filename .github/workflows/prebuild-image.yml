@@ -15,7 +15,7 @@ name: Prebuild workspace image
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     # Only rebuild when something that goes INTO the image changes.
     paths:
       - ".devcontainer/**"
