@@ -796,6 +796,23 @@ def handle_github_token(payload: dict[str, Any]) -> None:
     )
 
 
+def handle_slack_token(payload: dict[str, Any], slack: AsyncWebClient) -> None:
+    """Apply a Slack bot token pushed by Central over Ably. The bridge reads
+    SLACK_BOT_TOKEN only once at startup (wait_for_config), so a token minted by a
+    later (re)connect — or a fresh one pushed on wake — would never reach a running
+    bridge without a restart. Central pushes it here instead: we update the LIVE
+    Slack client's token so subsequent chat.postMessage calls authenticate, and
+    persist it to env + .env so a future restart keeps it."""
+    token = (payload or {}).get("token")
+    if not token or not isinstance(token, str):
+        log.warning("slack.token event missing token")
+        return
+    slack.token = token
+    os.environ["SLACK_BOT_TOKEN"] = token
+    _upsert_env_file("SLACK_BOT_TOKEN", token)
+    log.info("applied slack bot token (live client + env + .env)")
+
+
 def _env_encode(value: str) -> str:
     """Render a value for a dotenv line. Plain tokens (keys, URLs) are written
     raw; anything with spaces/quotes/newlines is double-quoted and escaped so the
@@ -910,6 +927,8 @@ async def dispatch(
         await handle_session_clear(payload, sessions)
     elif name == "github.token":
         handle_github_token(payload)
+    elif name == "slack.token":
+        handle_slack_token(payload, slack)
     elif name == "secrets.set":
         handle_secrets_set(payload)
     else:
