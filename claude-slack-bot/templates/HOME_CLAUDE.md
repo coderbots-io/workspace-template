@@ -10,6 +10,12 @@ using them. Docker is also available (Docker-in-Docker), so prefer `docker run`
 / `docker compose` for dependencies like Postgres, Redis, etc. instead of
 installing them directly on the host.
 
+## Screenshots
+
+When taking screenshots of a web page, set the browser window height to at
+least 1000px first (e.g. resize the viewport to 1280×1000 or taller) so the
+capture includes enough vertical content instead of a cramped strip.
+
 ## GitHub access
 
 This Codespace boots with GitHub's own default `GITHUB_TOKEN` env var — it's
