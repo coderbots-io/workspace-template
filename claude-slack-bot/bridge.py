@@ -429,9 +429,11 @@ async def _handle_user_message_inner(
         log.exception("session error on %s", thread_key)
         await renderer.replace_with(f":warning: error: `{e}`")
 
-    # Upload any files the agent flagged (parse the full text so a marker split
-    # across stream chunks is still caught).
-    paths = [m.group(1).strip() for m in _ATTACH_RE.finditer("".join(full_text))]
+    # Upload any files the agent flagged. Join blocks with a newline (not "")
+    # so an ATTACH: marker that starts its own text block stays at the start of
+    # a line — the marker regex is anchored with ^ under re.MULTILINE, so gluing
+    # blocks together would push the marker mid-line and it would never match.
+    paths = [m.group(1).strip() for m in _ATTACH_RE.finditer("\n".join(full_text))]
     if paths:
         await upload_files(slack, channel, reply_ts, paths)
 
@@ -490,7 +492,8 @@ async def upload_files(
                 filename=os.path.basename(p),
             )
             log.info("uploaded %s to channel=%s", p, channel)
-        except SlackApiError:
+        except Exception:  # noqa: BLE001 — a non-Slack error must still be logged,
+            # not swallowed silently by the asyncio task machinery.
             log.exception("files_upload_v2 failed for %s", p)
 
 
