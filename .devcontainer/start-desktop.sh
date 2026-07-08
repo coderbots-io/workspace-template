@@ -133,4 +133,33 @@ done
 vnc_serving \
   && log "ready -> KasmVNC web on :${WEB_PORT}" \
   || log "ERROR: desktop never bound :${WEB_PORT} after retries"
+
+# Keep Chrome running on the desktop. The agent drives it over the CDP debug
+# port (9222) and the Claude-in-Chrome extension, and users expect a browser
+# already open when they connect — so one must always be up. A detached respawn
+# loop relaunches Chrome within seconds if it's closed or crashes; the pgrep
+# guard leaves an already-running Chrome alone, a pidfile guard stops repeated
+# start-desktop runs stacking loops, and `9>&-` closes the flock fd so the loop
+# can't pin the desktop lock (the same trap the vncserver launch avoids).
+if vnc_serving; then
+  chrome_guard="$HOME/.vnc/chrome-keepalive.pid"
+  if [ -f "$chrome_guard" ] && kill -0 "$(cat "$chrome_guard" 2>/dev/null)" 2>/dev/null; then
+    log "chrome keep-alive already running (pid $(cat "$chrome_guard"))"
+  else
+    log "starting chrome keep-alive on $VNC_DISPLAY"
+    (
+      export DISPLAY="$VNC_DISPLAY"
+      while :; do
+        if pgrep -f "remote-debugging-port=9222" >/dev/null 2>&1; then
+          sleep 5                       # a Chrome is already up — leave it
+        else
+          /usr/local/bin/google-chrome >/tmp/chrome.log 2>&1 || true
+          sleep 2                       # it exited/crashed — relaunch shortly
+        fi
+      done
+    ) </dev/null >/dev/null 2>&1 9>&- &
+    echo $! > "$chrome_guard"
+  fi
+fi
+
 exit 0
