@@ -212,11 +212,40 @@ class SlackRenderer:
             return
         # Real output supersedes the tool-activity line.
         self._status = ""
-        if len(self._body) + len(text) > MAX_MSG_CHARS:
+        # Spread `text` across as many messages as needed so no single Slack
+        # message exceeds MAX_MSG_CHARS. A whole assistant reply can arrive in
+        # one chunk (not just small streamed deltas), so a single append may be
+        # much larger than the limit — chunk it, rolling over between pieces.
+        # Without this, a >limit chunk would land in one message and Slack's
+        # chat.update rejects it with `msg_too_long`.
+        while text:
+            capacity = MAX_MSG_CHARS - len(self._body)
+            if capacity <= 0:
+                await self.flush(force=True)
+                await self._roll_over()
+                continue
+            if len(text) <= capacity:
+                self._body += text
+                break
+            cut = self._split_point(text, capacity)
+            self._body += text[:cut]
+            text = text[cut:]
             await self.flush(force=True)
             await self._roll_over()
-        self._body += text
         await self.flush()
+
+    @staticmethod
+    def _split_point(text: str, capacity: int) -> int:
+        """Index (1..capacity) at which to cut `text` so the first piece fits in
+        `capacity`. Prefer a paragraph break, then a line break, then a space, so
+        we don't split mid-word; fall back to a hard cut when there's no nearby
+        boundary. Always returns >= 1 so the caller makes progress."""
+        window = text[:capacity]
+        for sep in ("\n\n", "\n", " "):
+            idx = window.rfind(sep)
+            if idx > 0:
+                return idx + len(sep)
+        return capacity
 
     async def status(self, label: str) -> None:
         """Reflect the current tool call in the message (edits in place). Keeps
