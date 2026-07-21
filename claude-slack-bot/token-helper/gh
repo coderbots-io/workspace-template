@@ -12,7 +12,9 @@
 # the origin remote of the current repo. coderbots-token mints/caches per owner.
 set -uo pipefail
 
-here="$(cd "$(dirname "$0")" && pwd)"
+# Resolve through symlinks: this shim is also linked from /usr/local/bin so
+# interactive shells get it; coderbots-token lives next to the REAL file.
+here="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
 token_bin="$here/coderbots-token"
 [ -x "$token_bin" ] || token_bin="coderbots-token"
 

@@ -700,8 +700,20 @@ def install_token_plumbing() -> None:
         except OSError:
             pass
 
-    # Resolve the REAL gh BEFORE the shim shadows it on PATH, so the shim can exec it.
-    real_gh = shutil.which("gh") or ""
+    # Resolve the REAL gh for the shim to exec. Never resolve to the shim itself:
+    # we symlink it to /usr/local/bin/gh (for interactive shells), so a plain
+    # which("gh") after that finds the shim and REAL_GH would exec itself forever.
+    shim_real = os.path.realpath(gh_shim)
+    real_gh = ""
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        cand = os.path.join(d, "gh")
+        if (
+            os.path.isfile(cand)
+            and os.access(cand, os.X_OK)
+            and os.path.realpath(cand) != shim_real
+        ):
+            real_gh = cand
+            break
 
     # Write the pull config the helper/shim read.
     try:
@@ -777,6 +789,18 @@ def install_token_plumbing() -> None:
         log.warning("could not set credential.useHttpPath: %s", e)
     # Prepend the shim dir so the agent's `gh` resolves to our wrapper.
     os.environ["PATH"] = helper_dir + os.pathsep + os.environ.get("PATH", "")
+    # Also expose the shim to interactive shells (SSH / VS Code terminals) — the
+    # PATH prepend above only covers this process tree. /usr/local/bin precedes
+    # /usr/bin on the default codespace PATH. Best-effort: needs passwordless
+    # sudo (standard in Codespaces); skip quietly where it isn't available.
+    try:
+        subprocess.run(
+            ["sudo", "-n", "ln", "-sf", gh_shim, "/usr/local/bin/gh"],
+            check=False, timeout=10,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
     log.info("installed token plumbing (git helper + gh shim); real gh=%s", real_gh or "<none>")
     # Warm the cache (best-effort) so the first git/gh op doesn't pay a pull.
     try:
